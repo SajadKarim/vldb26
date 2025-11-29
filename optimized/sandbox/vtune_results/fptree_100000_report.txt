@@ -1,0 +1,59 @@
+Elapsed Time: 3.811s
+    CPU Time: 0s
+    Memory Bound: 48.6% of Pipeline Slots
+     | The metric value is high. This may indicate that a significant fraction
+     | of execution pipeline slots could be stalled due to demand memory load
+     | and stores. Explore the metric breakdown by memory hierarchy, memory
+     | bandwidth information, and correlation by memory objects.
+     |
+        L1 Bound: 17.1% of Clockticks
+         | This metric shows how often machine was stalled without missing the
+         | L1 data cache. The L1 cache typically has the shortest latency.
+         | However, in certain cases like loads blocked on older stores, a load
+         | might suffer a high latency even though it is being satisfied by the
+         | L1.
+         |
+        L2 Bound
+        L3 Bound: 0.0% of Clockticks
+        DRAM Bound
+            DRAM Bandwidth Bound: 0.0% of Elapsed Time
+        Store Bound: 5.7% of Clockticks
+        NUMA: % of Remote Accesses: 0.0%
+        UPI Utilization Bound: 0.0% of Elapsed Time
+    Loads: 860,881,660
+    Stores: 523,206,313
+    LLC Miss Count: 0
+        Local Memory Access Count: 0
+        Remote Memory Access Count: 0
+        Remote Cache Access Count: 0
+    Average Latency (cycles): 56
+    Total Thread Count: 9
+    Paused Time: 0s
+
+Bandwidth Utilization
+Bandwidth Domain                  Platform Maximum  Observed Maximum  Average  % of Elapsed Time with High BW Utilization(%)
+--------------------------------  ----------------  ----------------  -------  ---------------------------------------------
+DRAM, GB/sec                      113                         34.500   10.329                                           0.0%
+UPI Utilization Single-link, (%)  100                          8.200    3.196                                           0.0%
+Collection and Platform Info
+    Application Command Line: ./benchmark_suite "--tree-type=fptree" "--dataset-size=100000" "--vtune-mode" 
+    Operating System: 5.4.0-216-generic DISTRIB_ID=Ubuntu DISTRIB_RELEASE=20.04 DISTRIB_CODENAME=focal DISTRIB_DESCRIPTION="Ubuntu 20.04.6 LTS"
+    Computer Name: bress145-14
+    Result Size: 13.5 MB 
+    Collection start time: 14:48:11 23/07/2025 UTC
+    Collection stop time: 14:48:15 23/07/2025 UTC
+    Collector Type: Driverless Perf system-wide sampling
+    CPU
+        Name: Intel(R) Xeon(R) Processor code named Cascadelake
+        Frequency: 2.200 GHz
+        Logical CPU Count: 96
+        Max DRAM Single-Package Bandwidth: 113.000 GB/s
+        LLC size: 37.5 MB 
+        Cache Allocation Technology
+            Level 2 capability: not detected
+            Level 3 capability: available
+
+If you want to skip descriptions of detected performance issues in the report,
+enter: vtune -report summary -report-knob show-issues=false -r <my_result_dir>.
+Alternatively, you may view the report in the csv format: vtune -report
+<report_name> -format=csv.

@@ -6,12 +6,13 @@
 #include "ycsbworkloadgenerator.hpp"
 #include "bm_tree_with_no_cache.hpp"
 #include "bm_tree_with_cache_real.hpp"
+#include "bm_tree_with_cache_ycsb.hpp"
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]\n";
     std::cout << "       " << program_name << " single <tree_type> <key_type> <value_type> <operation> <degree> [records] [runs]\n\n";
     std::cout << "Options:\n";
-    std::cout << "  --config <config>      Configuration: bm_nocache (default), bm_cache\n";
+    std::cout << "  --config <config>      Configuration: bm_nocache (default), bm_cache, bm_cache_ycsb\n";
     std::cout << "  --cache-type <type>    Cache type: LRU (default), CLOCK, A2Q (only for bm_cache)\n";
     std::cout << "  --cache-size <size>    Cache size (default: 100)\n";
     std::cout << "  --storage-type <type>  Storage type: VolatileStorage (default), FileStorage, PMemStorage (only for bm_cache)\n";
@@ -24,6 +25,8 @@ void print_usage(const char* program_name) {
     std::cout << "  --value-type <type>    Value type: uint64_t, char16\n";
     std::cout << "  --operation <op>       Operation: insert, delete, search_random, search_sequential,\n";
     std::cout << "                         search_uniform, search_zipfian\n";
+    std::cout << "  --workload-type <wl>   YCSB Workload: ycsb_a, ycsb_b, ycsb_c, ycsb_d, ycsb_e, ycsb_f\n";
+    std::cout << "                         (only for bm_cache_ycsb config)\n";
     std::cout << "  --degree <degree>      Tree degree (16-320)\n";
     std::cout << "  --records <count>      Number of records (100000, 500000, 1000000, 5000000, 10000000)\n";
     std::cout << "  --runs <count>         Number of test runs (default: 1)\n";
@@ -179,10 +182,35 @@ int main(int argc, char* argv[])
                 cache_type, runs, output_dir, storage_type, cache_size, page_size, memory_size,
                 operations, degrees, record_counts, threads, config_name, cache_size_percentage, cache_page_limit);
 #endif
-        // Removed bm_cache_simple - not needed
+        } else if (config == "bm_cache_ycsb") {
+#ifdef __TREE_WITH_CACHE__
+            std::cout << "Testing B+ Tree with " << cache_type << " Cache (YCSB Workloads)..." << std::endl;
+            std::cout << "Number of runs per configuration: " << runs << std::endl;
+            std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
+            
+            // Prepare YCSB workloads, degrees, and record counts based on provided parameters
+            std::vector<std::string> workload_types = {"ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"};
+            std::vector<size_t> degrees = {64, 128, 256};
+            std::vector<size_t> record_counts = {100000, 500000, 1000000};
+            
+            // Override with specific parameters if provided
+            if (args.count("workload-type")) {
+                workload_types = {args["workload-type"]};
+            }
+            if (args.count("degree")) {
+                degrees = {static_cast<size_t>(std::stoi(args["degree"]))};
+            }
+            if (args.count("records")) {
+                record_counts = {static_cast<size_t>(std::stoi(args["records"]))};
+            }
+            
+            bm_tree_with_cache_ycsb::test_ycsb_with_shell_parameters(
+                cache_type, runs, output_dir, storage_type, cache_size, page_size, memory_size,
+                workload_types, degrees, record_counts, threads, config_name, cache_size_percentage, cache_page_limit);
+#endif
         } else {
             std::cerr << "Error: Unknown configuration: " << config << std::endl;
-            std::cerr << "Available configurations: bm_nocache, bm_cache" << std::endl;
+            std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb" << std::endl;
             return 1;
         }
         return 0;
@@ -217,16 +245,25 @@ int main(int argc, char* argv[])
     std::string key_type = args.count("key-type") ? args["key-type"] : "uint64_t";
     std::string value_type = args.count("value-type") ? args["value-type"] : "uint64_t";
     std::string operation = args.count("operation") ? args["operation"] : "";
+    std::string workload_type = args.count("workload-type") ? args["workload-type"] : "";
     int degree = args.count("degree") ? std::stoi(args["degree"]) : 64;
     int records = args.count("records") ? std::stoi(args["records"]) : 100000;
     // runs is already declared earlier
     std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
     
     // Validate required parameters for single benchmark mode
-    if (tree_type.empty() || operation.empty()) {
-        std::cerr << "Error: --tree-type and --operation are required for single benchmark mode\n";
-        print_usage(argv[0]);
-        return 1;
+    if (config == "bm_cache_ycsb") {
+        if (tree_type.empty() || workload_type.empty()) {
+            std::cerr << "Error: --tree-type and --workload-type are required for YCSB benchmark mode\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    } else {
+        if (tree_type.empty() || operation.empty()) {
+            std::cerr << "Error: --tree-type and --operation are required for single benchmark mode\n";
+            print_usage(argv[0]);
+            return 1;
+        }
     }
     
     // Generate workloads if they don't exist (needed for single configuration mode)
@@ -238,7 +275,7 @@ int main(int argc, char* argv[])
     // Print configuration
     std::cout << "Configuration:\n";
     std::cout << "  Config: " << config << "\n";
-    if (config == "bm_cache") {
+    if (config == "bm_cache" || config == "bm_cache_ycsb") {
         std::cout << "  Cache Type: " << cache_type << "\n";
         std::cout << "  Cache Size: " << cache_size << "\n";
         std::cout << "  Storage Type: " << storage_type << "\n";
@@ -248,7 +285,11 @@ int main(int argc, char* argv[])
     std::cout << "  Tree Type: " << tree_type << "\n";
     std::cout << "  Key Type: " << key_type << "\n";
     std::cout << "  Value Type: " << value_type << "\n";
-    std::cout << "  Operation: " << operation << "\n";
+    if (config == "bm_cache_ycsb") {
+        std::cout << "  Workload Type: " << workload_type << "\n";
+    } else {
+        std::cout << "  Operation: " << operation << "\n";
+    }
     std::cout << "  Degree: " << degree << "\n";
     std::cout << "  Records: " << records << "\n";
     std::cout << "  Runs: " << runs << "\n";
@@ -274,9 +315,25 @@ int main(int argc, char* argv[])
         std::cerr << "Error: bm_cache configuration not available in this build" << std::endl;
         return 1;
 #endif
+    } else if (config == "bm_cache_ycsb") {
+#ifdef __TREE_WITH_CACHE__
+        // For YCSB, we need to call a different function that handles workload types
+        // Note: This is a simplified single config - for full testing use the shell script
+        std::vector<std::string> workload_types = {workload_type};
+        std::vector<size_t> degrees_vec = {static_cast<size_t>(degree)};
+        std::vector<size_t> records_vec = {static_cast<size_t>(records)};
+        
+        bm_tree_with_cache_ycsb::test_ycsb_with_shell_parameters(
+            cache_type, runs, output_dir, storage_type, cache_size, page_size, memory_size,
+            workload_types, degrees_vec, records_vec, threads, config_name, 
+            cache_size_percentage, cache_page_limit);
+#else
+        std::cerr << "Error: bm_cache_ycsb configuration not available in this build" << std::endl;
+        return 1;
+#endif
     } else {
         std::cerr << "Error: Unknown configuration: " << config << std::endl;
-        std::cerr << "Available configurations: bm_nocache, bm_cache" << std::endl;
+        std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb" << std::endl;
         return 1;
     }
     

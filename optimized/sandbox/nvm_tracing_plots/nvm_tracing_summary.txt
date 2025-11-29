@@ -1,0 +1,32 @@
+NVM I/O Tracing Analysis Summary
+===================================
+
+NVM Trees Analyzed:
+  Tree Types: FPTree, LBTree, InMemory + WAL
+  Dataset Sizes: 10000, 100000
+  Total Measurements: 6
+
+NVM I/O Summary by Tree Type:
+----------------------------------------
+
+FPTree:
+  Average NVM Write Bytes: 34
+  Average NVM Read Bytes: 0
+  Average Files Accessed: 7.0
+
+InMemory + WAL:
+  Average NVM Write Bytes: 0
+  Average NVM Read Bytes: 0
+  Average Files Accessed: 2.0
+
+LBTree:
+  Average NVM Write Bytes: 0
+  Average NVM Read Bytes: 0
+  Average Files Accessed: 6.0
+
+
+NVM Efficiency Rankings:
+-------------------------
+Best NVM Longevity (Fewest Writes): LBTree - 0 bytes
+Fewest Total NVM I/O: LBTree - 0 bytes
+Fewest NVM Files: InMemory + WAL - 2 files

@@ -1,0 +1,26 @@
+NVM Tracking Analysis Report
+============================
+Generated: 2025-07-23 20:53:09.074024
+Method: Code-level instrumentation with preprocessor controls
+
+SUMMARY STATISTICS:
+-------------------
+Total benchmark runs: 2
+Unique tree types: 1
+Dataset sizes tested: [10000]
+
+INMEMORY+WAL ANALYSIS:
+----------------------
+Total NVM writes: 10,299,904 bytes (9.8 MB)
+Total NVM reads: 0 bytes (0.0 MB)
+Write operations: 40,008
+Read operations: 0
+Average efficiency score: 0.936
+Average execution time: 0.009 seconds
+
+KEY INSIGHTS:
+-------------
+• InMemory+WAL shows efficient NVM usage (only WAL writes)
+• 256-byte granularity overhead is significant for small writes
+• NVM tracking provides accurate measurement of actual I/O
+• Preprocessor-based approach allows safe enable/disable

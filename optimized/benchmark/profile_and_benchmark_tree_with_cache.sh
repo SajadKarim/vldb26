@@ -20,7 +20,7 @@ BENCHMARK_EXEC="$BENCHMARK_DIR/benchmark"
 # Data directory configuration - Accept from environment variable or use default
 # Usage: DATA_PATH=/path/to/data ./profile_and_benchmark_tree_with_cache.sh
 # Default: /home/skarim/benchmark_data
-DATA_BASE_DIR="${DATA_PATH:-/home/skarim/benchmark_data}"
+DATA_BASE_DIR="${DATA_PATH:-/tmp/benchmark_data}"
 DATA_DIR="$DATA_BASE_DIR/data"
 YCSB_DIR="$DATA_BASE_DIR/ycsb"
 
@@ -44,7 +44,8 @@ echo "=========================================="
 # Cache-specific configuration arrays
 CACHE_TYPES=("LRU" "A2Q" "CLOCK")
 STORAGE_TYPES=("VolatileStorage" "PMemStorage" "FileStorage")
-CACHE_SIZE_PERCENTAGES=("2%" "10%" "25%")  # Cache sizes as percentages of estimated B+ tree pages
+#CACHE_SIZE_PERCENTAGES=("2%" "10%" "25%")  # Cache sizes as percentages of estimated B+ tree pages
+CACHE_SIZE_PERCENTAGES=("2%")  # Cache sizes as percentages of estimated B+ tree pages
 PAGE_SIZES=(4096)
 MEMORY_SIZES=(34359738368) #(2147483648)  # 512MB, 1GB, 2GB
 
@@ -55,7 +56,8 @@ TREES=("BplusTreeSOA")
 DEGREES=(24)
 
 # Operations to profile
-OPERATIONS=("insert" "search_random" "search_sequential" "search_uniform" "search_zipfian" "delete")
+#OPERATIONS=("insert" "search_random" "search_sequential" "search_uniform" "search_zipfian" "delete")
+OPERATIONS=("insert")
 
 # Key-Value type combinations (only implemented combinations)
 declare -A KEY_VALUE_COMBOS
@@ -65,7 +67,7 @@ KEY_VALUE_COMBOS["uint64_t_uint64_t"]="uint64_t uint64_t"
 
 # Record count for profiling
 RECORDS=(500000)
-RUNS=${RUNS:-5}  # Default to 3, but allow override via environment variable
+RUNS=${RUNS:-1}  # Default to 3, but allow override via environment variable
 #THREADS=(2 4 8 12 16 20 24 28 32 36 40)
 THREADS=(4)
 

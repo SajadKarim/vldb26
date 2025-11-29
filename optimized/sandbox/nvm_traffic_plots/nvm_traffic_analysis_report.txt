@@ -1,0 +1,53 @@
+NVM Traffic Analysis Report
+==============================
+
+EXECUTIVE SUMMARY:
+------------------
+This report analyzes actual NVM (Non-Volatile Memory) read/write traffic
+for three B+ tree implementations, accounting for NVM's 256-byte granularity.
+
+NVM USAGE PATTERNS:
+--------------------
+• FPTree: Direct leaf node storage on NVM (memory-mapped)
+• LBTree: Direct NVM mapping with explicit cache flushes
+• InMemory+WAL: Sequential WAL writes optimized for NVM
+
+DETAILED RESULTS:
+-----------------
+
+FPTree (10,000 records):
+  Execution Time: 0.313 seconds
+  NVM Writes: 409,600 bytes (0.4 MB)
+  NVM Reads: 122,880 bytes (0.1 MB)
+  Total NVM Traffic: 532,480 bytes (0.5 MB)
+  NVM Efficiency Score: 0.462 (lower is better)
+  Write Ratio: 76.9%
+
+LBTree (10,000 records):
+  Execution Time: 1.023 seconds
+  NVM Writes: 3,301,385,472 bytes (3148.4 MB)
+  NVM Reads: 660,277,094 bytes (629.7 MB)
+  Total NVM Traffic: 3,961,662,566 bytes (3778.1 MB)
+  NVM Efficiency Score: 0.500 (lower is better)
+  Write Ratio: 83.3%
+
+InMemory + WAL (10,000 records):
+  Execution Time: 0.023 seconds
+  NVM Writes: 5,371,081,128 bytes (5122.3 MB)
+  NVM Reads: 237,200 bytes (0.2 MB)
+  Total NVM Traffic: 5,371,318,328 bytes (5122.5 MB)
+  NVM Efficiency Score: 0.600 (lower is better)
+  Write Ratio: 100.0%
+
+NVM EFFICIENCY RANKINGS:
+-------------------------
+🥇 Best NVM Efficiency: FPTree (score: 0.462)
+🥈 Fewest NVM Writes: FPTree (409,600 bytes)
+🥉 Fastest Execution: InMemory + WAL (0.023 seconds)
+
+KEY INSIGHTS:
+-------------
+• NVM granularity (256 bytes) affects small write operations
+• Different trees have distinct NVM access patterns
+• Write-heavy workloads impact NVM wear and performance
+• Sequential writes (WAL) vs random writes (direct storage) trade-offs
