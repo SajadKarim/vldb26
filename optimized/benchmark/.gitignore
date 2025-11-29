@@ -1,0 +1,22 @@
+# Generated data files
+data/*.dat
+data/*.bin
+ycsb/*.dat
+ycsb/*.bin
+
+# Build outputs
+*.exe
+*.obj
+*.pdb
+*.lib
+*.dll
+*.log
+
+# Visual Studio files
+.vs/
+*.user
+x64/
+Debug/
+Release/
+Debug_TWC/
+Release_TWC/

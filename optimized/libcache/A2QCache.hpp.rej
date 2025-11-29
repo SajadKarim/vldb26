@@ -1,0 +1,50 @@
+--- libcache/A2QCache.hpp
++++ libcache/A2QCache.hpp
+@@ -289,9 +289,9 @@
+ 				return CacheErrorCode::CACHE_ERROR_OBJECT_NOT_FOUND;
+ 			}
+ 
+-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
++#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
+ 				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);		// call this once?? at the end???
+-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
++#endif
+ 
+ 			// Move to front of LRU
+ 			moveToFront(obj);
+@@ -346,9 +346,9 @@
+ 			{
+ 				moveToFront(lhs);
+ 
+-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
++#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
+ 				ASSERT(lhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
++#endif
+ 
+ 				// Increment hit count
+ 				incrementHitCount();
+@@ -367,9 +367,9 @@
+ 			{
+ 				moveToFront(rhs);
+ 
+-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
++#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
+ 				ASSERT(rhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
++#endif
+ 
+ 				// Increment hit count
+ 				incrementHitCount();
+@@ -440,9 +440,9 @@
+ 			{
+ 				moveToFront(obj);
+ 
+-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
++#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
+ 				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
++#endif
+ 
+ 				// Increment hit count
+ 				incrementHitCount();
