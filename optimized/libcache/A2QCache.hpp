@@ -16,6 +16,7 @@
 #include <optional>
 #include <algorithm>
 #include "validityasserts.h"
+#include <atomic>
 #ifdef __CACHE_COUNTERS__
 #include "CacheStatsProvider.hpp"
 #endif
@@ -53,6 +54,81 @@ public:
 			, m_ptrToDiscard(ptrToDiscard)
 		{}
 	};
+
+#ifdef __CONCURRENT__
+	// Lock-free per-thread circular buffer for deferred A2Q metadata updates
+	struct alignas(64) ThreadLocalBuffer
+	{
+		static constexpr size_t CAPACITY = 256;
+		ObjectTypePtr m_buffer[CAPACITY];
+		alignas(64) std::atomic<size_t> m_head{0};  // Consumer reads from head
+		alignas(64) std::atomic<size_t> m_tail{0};  // Producer writes to tail
+
+		ThreadLocalBuffer() {
+			for (size_t i = 0; i < CAPACITY; ++i) {
+				m_buffer[i] = nullptr;
+			}
+		}
+
+		// Producer: push objects (lock-free, called by worker threads)
+		void pushBatch(const std::vector<ObjectTypePtr>& objects) {
+			for (auto obj : objects) {
+				if (obj == nullptr || obj->m_ptrCoreObject == nullptr) {
+					continue;
+				}
+
+				// Write one object at a time, advancing tail after each write
+				while (true) {
+					size_t tail = m_tail.load(std::memory_order_relaxed);
+					size_t next_pos = (tail + 1) & (CAPACITY - 1);
+					size_t head = m_head.load(std::memory_order_relaxed);
+
+					// Check if buffer is full
+					if (next_pos == head) {
+						// Buffer full, wait with progressive backoff
+						for (int i = 0; i < 8; ++i) {
+							#if defined(__x86_64__) || defined(_M_X64)
+							__builtin_ia32_pause();
+							#elif defined(__aarch64__) || defined(_M_ARM64)
+							asm volatile("yield" ::: "memory");
+							#endif
+						}
+						// Reload positions after waiting
+						continue;
+					}
+
+					// Write object at current tail position
+					m_buffer[tail] = obj;
+					
+					// Advance tail atomically to make object visible
+					m_tail.store(next_pos, std::memory_order_release);
+					break;
+				}
+			}
+		}
+
+		// Consumer: pop one object (lock-free, called by background thread)
+		ObjectTypePtr pop() {
+			size_t head = m_head.load(std::memory_order_relaxed);
+			size_t tail = m_tail.load(std::memory_order_acquire);
+
+			if (head == tail) {
+				return nullptr;  // Buffer empty
+			}
+
+			ObjectTypePtr obj = m_buffer[head];
+			size_t next_head = (head + 1) & (CAPACITY - 1);
+			m_head.store(next_head, std::memory_order_release);
+			return obj;
+		}
+
+		bool empty() const {
+			size_t head = m_head.load(std::memory_order_relaxed);
+			size_t tail = m_tail.load(std::memory_order_acquire);
+			return head == tail;
+		}
+	};
+#endif //__CONCURRENT__
 
 #ifndef __CONCURRENT__
 	static constexpr bool MARK_INUSE_FLAG = false;
@@ -117,6 +193,15 @@ private:
 	mutable std::shared_mutex m_mtxCache;
 	mutable std::shared_mutex m_mtxStorage;
 
+	// Lock-free per-thread circular buffers for A2Q metadata updates
+	static constexpr size_t MAX_THREADS = 128;
+	ThreadLocalBuffer m_threadBuffers[MAX_THREADS];
+	std::atomic<size_t> m_nThreadCount{0};
+	
+	// Background thread for processing A2Q metadata updates
+	std::atomic<bool> m_bStopA2Q{false};
+	std::thread m_threadA2QUpdate;
+
 #ifdef __CACHE_COUNTERS__
 	// Storage for background thread's cache statistics
 	std::vector<std::pair<std::chrono::steady_clock::time_point, uint64_t>> m_backgroundThreadHits;
@@ -151,6 +236,32 @@ public:
 	~A2QCache()
 	{
 #ifdef __CONCURRENT__
+		// First, wait for all thread-local buffers to drain
+		size_t num_threads = m_nThreadCount.load(std::memory_order_acquire);
+		if (num_threads > 0) {
+			bool all_empty = false;
+			int max_wait_iterations = 1000;  // Prevent infinite loop
+			while (!all_empty && max_wait_iterations-- > 0) {
+				all_empty = true;
+				for (size_t i = 0; i < num_threads; ++i) {
+					if (!m_threadBuffers[i].empty()) {
+						all_empty = false;
+						break;
+					}
+				}
+				if (!all_empty) {
+					std::this_thread::sleep_for(std::chrono::microseconds(100));
+				}
+			}
+		}
+		
+		// Stop LRU update thread first
+		m_bStopA2Q.store(true, std::memory_order_release);
+		if (m_threadA2QUpdate.joinable()) {
+			m_threadA2QUpdate.join();
+		}
+		
+		// Then stop cache flush thread
 		m_bStop = true;
 		m_threadCacheFlush.join();
 #endif //__CONCURRENT__
@@ -219,6 +330,8 @@ public:
 
 #ifdef __CONCURRENT__
 		m_bStop = false;
+		m_bStopA2Q.store(false, std::memory_order_release);
+		m_threadA2QUpdate = std::thread(handlerA2QUpdate, this);
 		m_threadCacheFlush = std::thread(handlerCacheFlush, this);
 #endif //__CONCURRENT__
 
@@ -291,12 +404,49 @@ public:
 		}
 #endif //__SELECTIVE_UPDATE__
 
+#ifdef __CONCURRENT__
+		// Lock-free path: push objects to thread-local buffer
+		thread_local size_t tl_thread_id = []() {
+			static std::atomic<size_t> s_next_id{0};
+			return s_next_id.fetch_add(1, std::memory_order_acq_rel);
+		}();
+
+		// Register this thread on first access
+		thread_local bool tl_registered = [this, tl_thread_id]() {
+			if (tl_thread_id < MAX_THREADS) {
+				// Atomically update the thread count to the maximum seen thread ID + 1
+				size_t current_count = m_nThreadCount.load(std::memory_order_acquire);
+				while (current_count <= tl_thread_id) {
+					if (m_nThreadCount.compare_exchange_weak(current_count, tl_thread_id + 1, 
+						std::memory_order_acq_rel, std::memory_order_acquire)) {
+						break;
+					}
+				}
+			}
+			return true;
+		}();
+		(void)tl_registered;  // Suppress unused variable warning
+
+		if (tl_thread_id < MAX_THREADS) {
+			m_threadBuffers[tl_thread_id].pushBatch(vtObjects);
+		}
+
+		// Decrement use counters
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			auto& obj = *it;
+			if (obj != nullptr && obj->m_ptrCoreObject != nullptr)
+			{
+				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+
+		vtObjects.clear();
+		return CacheErrorCode::Success;
+#else
 		uint64_t nUsedCapacityFrequentQ = 0;
 		uint64_t nUsedCapacityHybridQ = 0;
-
-#ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
 
 		bool bChildInFrequentQ = false;
 		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
@@ -316,33 +466,18 @@ public:
 				moveToTheFrontOfCacheQ(obj, nUsedCapacityFrequentQ, nUsedCapacityHybridQ);
 
 				bChildInFrequentQ |= (obj->m_nQueueType > QType::NONE);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);		// call this once?? at the end???
-				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
-#ifdef __CONCURRENT__
-		lock_cache.unlock();
-#endif //__CONCURRENT__
-
 		vtObjects.clear();
 
-#ifdef __CONCURRENT__
-		m_nUsedCapacityFrequentQ.fetch_add(nUsedCapacityFrequentQ, std::memory_order_relaxed);
-		m_nUsedCapacityHybridQ.fetch_sub(nUsedCapacityHybridQ, std::memory_order_relaxed);
-#else //__CONCURRENT__
 		m_nUsedCapacityFrequentQ += nUsedCapacityFrequentQ;
 		m_nUsedCapacityHybridQ -= nUsedCapacityHybridQ;
-#endif //__CONCURRENT__
 
-#ifndef __CONCURRENT__
 		flushItemsToStorage();
-#endif //__CONCURRENT__
 
 		return CacheErrorCode::Success;
+#endif //__CONCURRENT__
 	}
 
 #ifdef __SELECTIVE_UPDATE__
@@ -377,13 +512,64 @@ public:
 		}
 #endif //__SELECTIVE_UPDATE__
 
+#ifdef __CONCURRENT__
+		// Lock-free path: push objects to thread-local buffer
+		thread_local size_t tl_thread_id = []() {
+			static std::atomic<size_t> s_next_id{0};
+			return s_next_id.fetch_add(1, std::memory_order_acq_rel);
+		}();
 
+		// Register this thread on first access
+		thread_local bool tl_registered = [this, tl_thread_id]() {
+			if (tl_thread_id < MAX_THREADS) {
+				// Atomically update the thread count to the maximum seen thread ID + 1
+				size_t current_count = m_nThreadCount.load(std::memory_order_acquire);
+				while (current_count <= tl_thread_id) {
+					if (m_nThreadCount.compare_exchange_weak(current_count, tl_thread_id + 1, 
+						std::memory_order_acq_rel, std::memory_order_acquire)) {
+						break;
+					}
+				}
+			}
+			return true;
+		}();
+		(void)tl_registered;  // Suppress unused variable warning
+
+		if (tl_thread_id < MAX_THREADS) {
+			// Flatten pairs into a single vector for pushBatch
+			std::vector<ObjectTypePtr> flatObjects;
+			flatObjects.reserve(vtObjects.size() * 2);
+			for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++) {
+				flatObjects.push_back((*it).first);
+				flatObjects.push_back((*it).second);
+			}
+			m_threadBuffers[tl_thread_id].pushBatch(flatObjects);
+		}
+
+		// Decrement use counters
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			auto& lhs = (*it).first;
+			auto& rhs = (*it).second;
+
+			if (lhs != nullptr && lhs->m_ptrCoreObject != nullptr)
+			{
+				ASSERT(lhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+				lhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
+			}
+
+			if (rhs != nullptr && rhs->m_ptrCoreObject != nullptr)
+			{
+				ASSERT(rhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+				rhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+
+		vtObjects.clear();
+		return CacheErrorCode::Success;
+#else
 		uint64_t nUsedCapacityFrequentQ = 0;
 		uint64_t nUsedCapacityHybridQ = 0;
-
-#ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
 
 		bool bChildInFrequentQ = false;
 		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
@@ -404,12 +590,6 @@ public:
 				moveToTheFrontOfCacheQ(lhs, nUsedCapacityFrequentQ, nUsedCapacityHybridQ);
 
 				bChildInFrequentQ |= (lhs->m_nQueueType > QType::NONE);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(lhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				lhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
-
 			}
 
 			if (rhs != nullptr && rhs->m_ptrCoreObject != nullptr)
@@ -425,33 +605,18 @@ public:
 				moveToTheFrontOfCacheQ(rhs, nUsedCapacityFrequentQ, nUsedCapacityHybridQ);
 
 				bChildInFrequentQ |= (rhs->m_nQueueType > QType::NONE);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(rhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				rhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
-#ifdef __CONCURRENT__
-		lock_cache.unlock();
-#endif //__CONCURRENT__
-
 		vtObjects.clear();
 
-#ifdef __CONCURRENT__
-		m_nUsedCapacityFrequentQ.fetch_add(nUsedCapacityFrequentQ, std::memory_order_relaxed);
-		m_nUsedCapacityHybridQ.fetch_sub(nUsedCapacityHybridQ, std::memory_order_relaxed);
-#else //__CONCURRENT__
 		m_nUsedCapacityFrequentQ += nUsedCapacityFrequentQ;
 		m_nUsedCapacityHybridQ -= nUsedCapacityHybridQ;
-#endif //__CONCURRENT__
 
-#ifndef __CONCURRENT__
 		flushItemsToStorage();
-#endif //__CONCURRENT__
 
 		return CacheErrorCode::Success;
+#endif //__CONCURRENT__
 	}
 
 #ifdef __SELECTIVE_UPDATE__
@@ -495,12 +660,74 @@ public:
 		}
 #endif //__SELECTIVE_UPDATE__
 
+#ifdef __CONCURRENT__
+		// Lock-free path: push objects to thread-local buffer
+		thread_local size_t tl_thread_id = []() {
+			static std::atomic<size_t> s_next_id{0};
+			return s_next_id.fetch_add(1, std::memory_order_acq_rel);
+		}();
+
+		// Register this thread on first access
+		thread_local bool tl_registered = [this, tl_thread_id]() {
+			if (tl_thread_id < MAX_THREADS) {
+				// Atomically update the thread count to the maximum seen thread ID + 1
+				size_t current_count = m_nThreadCount.load(std::memory_order_acquire);
+				while (current_count <= tl_thread_id) {
+					if (m_nThreadCount.compare_exchange_weak(current_count, tl_thread_id + 1, 
+						std::memory_order_acq_rel, std::memory_order_acquire)) {
+						break;
+					}
+				}
+			}
+			return true;
+		}();
+		(void)tl_registered;  // Suppress unused variable warning
+
+		if (tl_thread_id < MAX_THREADS) {
+			// Flatten OpDeleteInfo into a single vector for pushBatch
+			std::vector<ObjectTypePtr> flatObjects;
+			flatObjects.reserve(vtObjects.size() * 2);
+			for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++) {
+				// Handle m_ptrToDiscard separately (needs remove())
+				if ((*it).m_ptrToDiscard != nullptr) {
+					remove((*it).m_ptrToDiscard);
+				}
+				flatObjects.push_back((*it).m_ptrPrimary);
+				flatObjects.push_back((*it).m_ptrAffectedSibling);
+			}
+			m_threadBuffers[tl_thread_id].pushBatch(flatObjects);
+		}
+
+		// Decrement use counters
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			for (int j = 1; j >= 0; j--)
+			{
+				ObjectTypePtr obj = nullptr;
+				switch (j)
+				{
+				case 0:
+					obj = (*it).m_ptrPrimary;
+					break;
+				case 1:
+					obj = (*it).m_ptrAffectedSibling;
+					break;
+				default:
+					ASSERT(false && "Invalid state.");
+				}
+
+				if (obj == nullptr || obj->m_ptrCoreObject == nullptr) continue;
+
+				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
+				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
+			}
+		}
+
+		vtObjects.clear();
+		return CacheErrorCode::Success;
+#else
 		uint64_t nUsedCapacityFrequentQ = 0;
 		uint64_t nUsedCapacityHybridQ = 0;
-
-#ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
 
 		bool bChildInFrequentQ = false;
 
@@ -537,33 +764,18 @@ public:
 				moveToTheFrontOfCacheQ(obj, nUsedCapacityFrequentQ, nUsedCapacityHybridQ);
 
 				bChildInFrequentQ |= (obj->m_nQueueType > QType::NONE);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
-#ifdef __CONCURRENT__
-		lock_cache.unlock();
-#endif //__CONCURRENT__
-
 		vtObjects.clear();
 
-#ifdef __CONCURRENT__
-		m_nUsedCapacityFrequentQ.fetch_add(nUsedCapacityFrequentQ, std::memory_order_relaxed);
-		m_nUsedCapacityHybridQ.fetch_sub(nUsedCapacityHybridQ, std::memory_order_relaxed);
-#else //__CONCURRENT__
 		m_nUsedCapacityFrequentQ += nUsedCapacityFrequentQ;
 		m_nUsedCapacityHybridQ -= nUsedCapacityHybridQ;
-#endif //__CONCURRENT__
 
-#ifndef __CONCURRENT__
 		flushItemsToStorage();
-#endif //__CONCURRENT__
 
 		return CacheErrorCode::Success;
+#endif //__CONCURRENT__
 	}
 
 	CacheErrorCode remove(ObjectTypePtr& ptrObject)
@@ -593,19 +805,6 @@ public:
 
 		ptrObject->m_nQueueType = QType::NONE;
 		ptrObject->m_bIsDowgraded = false;
-
-#ifdef __COST_WEIGHTED_EVICTION__
-		// Capture the cost of accessing this object from storage
-		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
-		{
-			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
-			ptrObject->setObjectCost(accessCost);
-		}
-		else
-		{
-			ptrObject->setObjectCost(1);
-		}
-#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 		m_nUsedCapacityHybridQ.fetch_add(1, std::memory_order_relaxed);
@@ -700,11 +899,6 @@ public:
 		uidObject.createUIDFromVolatilePointer((uint8_t)Type::UID, reinterpret_cast<uintptr_t>(ptrObject));
 
 		ptrObject->m_uid = uidObject;
-
-#ifdef __COST_WEIGHTED_EVICTION__
-		// Newly created objects get default cost
-		ptrObject->setObjectCost(1);
-#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 		m_nUsedCapacityHybridQ.fetch_add(1, std::memory_order_relaxed);
@@ -1397,110 +1591,6 @@ private:
 		}
 	}
 
-#ifdef __COST_WEIGHTED_EVICTION__
-	/**
-	 * @brief Unlinks a node from the Hybrid Queue without deleting it
-	 * @param ptrNode The node to unlink
-	 */
-	inline void unlinkNodeFromHybridQ(ObjectTypePtr ptrNode)
-	{
-		if (!ptrNode) return;
-
-		ObjectTypePtr prev = ptrNode->m_ptrPrev;
-		ObjectTypePtr next = ptrNode->m_ptrNext;
-
-		// Case 1: Single node (both head and tail)
-		if (!prev && !next)
-		{
-			m_ptrHeadHybridQ = nullptr;
-			m_ptrTailHybridQ = nullptr;
-		}
-		// Case 2: Node is head
-		else if (ptrNode == m_ptrHeadHybridQ)
-		{
-			m_ptrHeadHybridQ = next;
-			if (next)
-			{
-				next->m_ptrPrev = nullptr;
-			}
-		}
-		// Case 3: Node is tail
-		else if (ptrNode == m_ptrTailHybridQ)
-		{
-			m_ptrTailHybridQ = prev;
-			if (prev)
-			{
-				prev->m_ptrNext = nullptr;
-			}
-		}
-		// Case 4: Node is in the middle
-		else
-		{
-			if (prev)
-			{
-				prev->m_ptrNext = next;
-			}
-			if (next)
-			{
-				next->m_ptrPrev = ptrNode->m_ptrPrev;
-			}
-		}
-
-		// Clear the removed node's pointers
-		ptrNode->m_ptrNext = nullptr;
-		ptrNode->m_ptrPrev = nullptr;
-	}
-
-	/**
-	 * @brief Finds the best victim for eviction from Hybrid Queue based on cost ratio
-	 * Compares the tail (LRU position) with its predecessor and evicts whichever has lower cost
-	 * @return Pointer to the victim node, or nullptr if no victim can be found
-	 */
-	inline ObjectTypePtr findVictimByCostRatioHybridQ()
-	{
-		if (!m_ptrTailHybridQ) return nullptr;
-
-		ObjectTypePtr tail = m_ptrTailHybridQ;
-		ObjectTypePtr predecessor = m_ptrTailHybridQ->m_ptrPrev;
-
-#ifdef __CONCURRENT__
-		// If tail is in use, can't evict it
-		if (tail->m_nUseCounter.load(std::memory_order_relaxed) > 0)
-		{
-			return nullptr;
-		}
-#endif //__CONCURRENT__
-
-		// If no predecessor, must evict tail
-		if (!predecessor)
-		{
-			return tail;
-		}
-
-#ifdef __CONCURRENT__
-		// If predecessor is in use, evict tail
-		if (predecessor->m_nUseCounter.load(std::memory_order_relaxed) > 0)
-		{
-			return tail;
-		}
-#endif //__CONCURRENT__
-
-		uint64_t tailCost = tail->getObjectCost();
-		uint64_t predCost = predecessor->getObjectCost();
-
-		// Evict whichever has lower cost (cheaper to re-fetch)
-		// If costs are equal, prefer tail (LRU default)
-		if (tailCost <= predCost)
-		{
-			return tail;
-		}
-		else
-		{
-			return predecessor;
-		}
-	}
-#endif //__COST_WEIGHTED_EVICTION__
-
 	inline void flushItemsToStorage()
 	{
 #ifdef __CONCURRENT__
@@ -1594,28 +1684,6 @@ private:
 		for (; nFlushCount > 0; nFlushCount--)
 		//while (m_nUsedCapacityHybridQ.load(std::memory_order_relaxed) > getCapacityHybridQ())
 		{
-#ifdef __COST_WEIGHTED_EVICTION__
-			// Use cost-weighted victim selection for Hybrid Queue
-			ObjectTypePtr ptrItemToFlush = findVictimByCostRatioHybridQ();
-
-			if (!ptrItemToFlush) break;  // No victim found
-
-			if (!ptrItemToFlush->m_mtx.try_lock()) break;
-
-			if (ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) != 0)
-			{
-				ptrItemToFlush->m_mtx.unlock();
-				break;
-			}
-
-			vtObjects.push_back(ptrItemToFlush);
-
-			// Unlink the victim (could be tail or predecessor)
-			unlinkNodeFromHybridQ(ptrItemToFlush);
-
-			m_nUsedCapacityHybridQ.fetch_sub(1, std::memory_order_relaxed);
-#else
-			// Traditional LRU: always evict tail
 			if (m_ptrTailHybridQ == nullptr) break;
 
 			if (m_ptrTailHybridQ->m_nUseCounter.load(std::memory_order_relaxed) != 0) break;
@@ -1655,7 +1723,6 @@ private:
 			ptrItemToFlush->m_ptrNext = nullptr;
 
 			m_nUsedCapacityHybridQ.fetch_sub(1, std::memory_order_relaxed);
-#endif //__COST_WEIGHTED_EVICTION__
 		}
 
 		lock_cache.unlock();
@@ -1785,50 +1852,6 @@ private:
 
 		while (m_nUsedCapacityHybridQ > getCapacityHybridQ())
 		{
-#ifdef __COST_WEIGHTED_EVICTION__
-			// Use cost-weighted victim selection for Hybrid Queue
-			ObjectTypePtr ptrTemp = findVictimByCostRatioHybridQ();
-
-			if (!ptrTemp) break;  // No victim found
-
-			bool is_dirty = ptrTemp->hasUpdatesToBeFlushed();
-			if (is_dirty) //check for uidupdated and uid in the cache object and reset uidupdated once used!!!
-			{
-				ObjectUIDType uidUpdated;
-				if (m_ptrStorage->addObject(ptrTemp, uidUpdated) != CacheErrorCode::Success)
-				{
-					std::cout << "Critical State: Failed to add object to Storage." << std::endl;
-					throw new std::logic_error(".....");   // TODO: critical log.
-				}
-
-				ptrTemp->m_uidUpdated = uidUpdated;
-			}
-
-#ifdef __CACHE_COUNTERS__
-			// Record eviction with dirty flag
-			this->recordEviction(is_dirty);
-#endif
-
-			ptrTemp->m_bDirty = false;
-
-			// Unlink the victim (could be tail or predecessor)
-			unlinkNodeFromHybridQ(ptrTemp);
-
-#ifdef __MANAGE_GHOST_Q__
-			if (ptrTemp->m_uidUpdated != std::nullopt) addItemToGhostQ(*ptrTemp->m_uidUpdated);
-			else addItemToGhostQ(ptrTemp->m_uid);
-#endif //__MANAGE_GHOST_Q__
-
-			// Call custom deletion logic and release the pointer
-			ptrTemp->m_bDirty = false;
-			ptrTemp->deleteCoreObject();
-			ptrTemp->m_nQueueType = QType::NONE;
-			ptrTemp = nullptr;
-
-			ASSERT(m_nUsedCapacityHybridQ != 0);
-			m_nUsedCapacityHybridQ--;
-#else
-			// Traditional LRU: always evict tail
 			ASSERT(m_ptrTailHybridQ != nullptr);
 
 			bool is_dirty = m_ptrTailHybridQ->hasUpdatesToBeFlushed();
@@ -1885,7 +1908,6 @@ private:
 
 			ASSERT(m_nUsedCapacityHybridQ != 0);
 			m_nUsedCapacityHybridQ--;
-#endif //__COST_WEIGHTED_EVICTION__
 		}
 #endif //__CONCURRENT__
 	}
@@ -2340,6 +2362,66 @@ public:
 	}
 
 #ifdef __CONCURRENT__
+	static void handlerA2QUpdate(SelfType* ptrSelf)
+	{
+		using namespace std::chrono_literals;
+		
+		while (!ptrSelf->m_bStopA2Q.load(std::memory_order_acquire))
+		{
+			size_t num_threads = ptrSelf->m_nThreadCount.load(std::memory_order_acquire);
+			
+			// If no threads have registered yet, sleep and continue
+			if (num_threads == 0) {
+				std::this_thread::sleep_for(10us);
+				continue;
+			}
+			
+			// Round-robin through all thread buffers
+			static thread_local size_t round_robin_idx = 0;
+			size_t start_idx = round_robin_idx % num_threads;
+			
+			bool processed_any = false;
+			
+			// Try to process one object from each thread's buffer
+			for (size_t i = 0; i < num_threads; ++i) {
+				size_t idx = (start_idx + i) % num_threads;
+				auto& buffer = ptrSelf->m_threadBuffers[idx];
+				
+				ObjectTypePtr obj = buffer.pop();
+				if (obj != nullptr && obj->m_ptrCoreObject != nullptr) {
+					processed_any = true;
+					
+					// Acquire cache lock and update A2Q metadata
+					std::unique_lock<std::shared_mutex> lock_cache(ptrSelf->m_mtxCache);
+					
+					uint64_t nUsedCapacityFrequentQ = 0;
+					uint64_t nUsedCapacityHybridQ = 0;
+					
+					// Determine if we should promote to FrequentQ based on current queue type
+					// This is a simplified version - the full logic would need parent-child context
+					ptrSelf->moveToTheFrontOfCacheQ(obj, nUsedCapacityFrequentQ, nUsedCapacityHybridQ);
+					
+					lock_cache.unlock();
+					
+					// Update atomic counters
+					if (nUsedCapacityFrequentQ > 0) {
+						ptrSelf->m_nUsedCapacityFrequentQ.fetch_add(nUsedCapacityFrequentQ, std::memory_order_relaxed);
+					}
+					if (nUsedCapacityHybridQ > 0) {
+						ptrSelf->m_nUsedCapacityHybridQ.fetch_sub(nUsedCapacityHybridQ, std::memory_order_relaxed);
+					}
+				}
+			}
+			
+			round_robin_idx++;
+			
+			// If we didn't process anything, sleep briefly to avoid spinning
+			if (!processed_any) {
+				std::this_thread::sleep_for(10us);
+			}
+		}
+	}
+
 	static void handlerCacheFlush(SelfType* ptrSelf)
 	{
 		do

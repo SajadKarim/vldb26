@@ -344,7 +344,7 @@ void perform_ycsb_operations(
     // Single-threaded implementation
     std::cout << "Performing YCSB operations (single-threaded)..." << std::endl;
     auto begin = std::chrono::steady_clock::now();
-    //for (size_t j = 0; j < 10; j++) {
+    
     ValueType value;
     for (size_t i = 0; i < operation_count; i++) {
 #ifdef __RECORD_LATENCY__
@@ -396,14 +396,15 @@ void perform_ycsb_operations(
         }
 #endif
     }
-    //}
+    
     auto end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
     
 #else // __CONCURRENT__
-    if (threads == 1) {
+    //if (threads == 1) {
         // never occur .. as already addressed above
-    } else {
+    //} else 
+    {
         // Multi-threaded implementation - split pre-generated operations array
         std::cout << "Performing YCSB operations with " << threads << " threads..." << std::endl;
         
@@ -632,7 +633,7 @@ void run_ycsb_cache_benchmark(
         }
         
         std::cout << "Initial population complete. Starting YCSB workload execution..." << std::endl;
-//ptrTree.flush();
+
         // Execute YCSB workload operations
         perform_ycsb_operations<StoreType, KeyType, ValueType>(
             ptrTree, operations, operations.size(), threads, duration,

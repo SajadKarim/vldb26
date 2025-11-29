@@ -30,7 +30,7 @@ target_compile_features(haldendb_compiler_flags  INTERFACE cxx_std_20)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_definitions(__ENABLE_ASSERTS__)
 endif()
-#add_compile_definitions(__CONCURRENT__)
+add_compile_definitions(__CONCURRENT__)
 # Note: Benchmark tests no cache trees, so we don't define __TREE_WITH_CACHE__
 add_compile_definitions(__TREE_WITH_CACHE__)
 #add_compile_definitions(__VALIDITY_CHECK__)
@@ -46,25 +46,6 @@ set(CMAKE_CXX_COMPILER g++-11)
 
 add_executable(benchmark benchmark.cpp)
 
-# Add policy selector CLI utility
-add_executable(policy_selector_cli policy_selector_cli.cpp)
-set_target_properties(policy_selector_cli PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-)
-target_include_directories(policy_selector_cli PRIVATE
-    "${PROJECT_SOURCE_DIR}/../libcache"
-)
-
-# Add DeviceAwarePolicy test program
-#add_executable(test_device_aware_policy test_device_aware_policy.cpp)
-#set_target_properties(test_device_aware_policy PROPERTIES
-#    CXX_STANDARD 20
-#    CXX_STANDARD_REQUIRED ON
-#)
-#target_include_directories(test_device_aware_policy PRIVATE
-#    "${PROJECT_SOURCE_DIR}/../libcache"
-#)
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)

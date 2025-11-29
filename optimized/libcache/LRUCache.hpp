@@ -12,6 +12,8 @@
 #include <tuple>
 #include <condition_variable>
 #include <unordered_map>
+#include <atomic>
+#include <array>
 #include "CacheErrorCodes.h"
 #include <optional>
 #include "PMemWAL.hpp"
@@ -62,6 +64,153 @@ public:
 #endif //__CONCURRENT__
 
 private:
+#ifdef __CONCURRENT__
+	// Lock-free per-thread circular buffer for LRU updates
+	struct ThreadLocalBuffer {
+		static constexpr size_t CAPACITY = 256;
+		
+		alignas(64) std::atomic<size_t> head;
+		alignas(64) std::atomic<size_t> tail;
+		std::array<ObjectTypePtr, CAPACITY> buffer;
+		
+		ThreadLocalBuffer() : head(0), tail(0) {
+			buffer.fill(nullptr);
+		}
+		
+		// Push batch of objects to buffer (never fails, always retries)
+		void pushBatch(const std::vector<ObjectTypePtr>& objects) {
+			size_t batch_size = objects.size();
+			
+			// Split large batches into chunks
+			if (batch_size >= CAPACITY - 1) {
+				constexpr size_t CHUNK_SIZE = 200;
+				for (size_t i = 0; i < batch_size; i += CHUNK_SIZE) {
+					size_t chunk_end = std::min(i + CHUNK_SIZE, batch_size);
+					std::vector<ObjectTypePtr> chunk(objects.begin() + i, objects.begin() + chunk_end);
+					pushBatch(chunk);
+				}
+				return;
+			}
+			
+			size_t retry_count = 0;
+			
+			// Write all objects first
+			for (size_t i = 0; i < batch_size; ++i) {
+				// Reload tail for each object to get current position
+				size_t write_pos = tail.load(std::memory_order_relaxed);
+				size_t next_pos = (write_pos + 1) & (CAPACITY - 1);
+				
+				// Progressive backoff while buffer is full
+				while (next_pos == head.load(std::memory_order_relaxed)) {
+					if (retry_count < 10) {
+						std::this_thread::yield();
+					} else if (retry_count < 100) {
+						std::this_thread::sleep_for(std::chrono::microseconds(1));
+					} else if (retry_count < 1000) {
+						std::this_thread::sleep_for(std::chrono::microseconds(10));
+					} else {
+						std::this_thread::sleep_for(std::chrono::microseconds(100));
+					}
+					++retry_count;
+					
+					// Reload positions after waiting
+					write_pos = tail.load(std::memory_order_relaxed);
+					next_pos = (write_pos + 1) & (CAPACITY - 1);
+				}
+				
+				// Write object at current tail position
+				buffer[write_pos] = objects[i];
+				
+				// Atomically advance tail to make this object visible
+				tail.store(next_pos, std::memory_order_release);
+			}
+		}
+		
+		// Pop one object from buffer
+		bool pop(ObjectTypePtr& out_object) {
+			size_t current_head = head.load(std::memory_order_relaxed);
+			size_t current_tail = tail.load(std::memory_order_acquire);
+			
+			// Check if empty
+			if (current_head == current_tail) {
+				return false;
+			}
+			
+			// Read object
+			out_object = buffer[current_head];
+			
+			// Advance head
+			size_t next_head = (current_head + 1) & (CAPACITY - 1);
+			head.store(next_head, std::memory_order_release);
+			
+			return true;
+		}
+		
+		// Pop all pending items in one atomic snapshot
+		// Handles circular buffer wraparound efficiently
+		bool popBatch(std::vector<ObjectTypePtr>& out_objects) {
+			size_t current_head = head.load(std::memory_order_relaxed);
+			size_t current_tail = tail.load(std::memory_order_acquire);
+			
+			// Check if empty
+			if (current_head == current_tail) {
+				return false;
+			}
+			
+			size_t count = 0;
+			
+			// Handle circular buffer wraparound
+			if (current_head < current_tail) {
+				// No wrap: items are contiguous [head, tail)
+				count = current_tail - current_head;
+				out_objects.resize(count);
+				
+				// Direct assignment with moves (pointers, so moves are just copies)
+				for (size_t i = 0; i < count; ++i) {
+					out_objects[i] = std::move(buffer[current_head + i]);
+				}
+			} else {
+				// Wrap-around: items at [head, CAPACITY) AND [0, tail)
+				size_t first_part = CAPACITY - current_head;   // items from head to end
+				size_t second_part = current_tail;              // items from start to tail
+				count = first_part + second_part;
+				
+				out_objects.resize(count);
+				size_t write_idx = 0;
+				
+				// Move [head, CAPACITY)
+				for (size_t i = 0; i < first_part; ++i) {
+					out_objects[write_idx++] = std::move(buffer[current_head + i]);
+				}
+				
+				// Move [0, tail)
+				for (size_t i = 0; i < second_part; ++i) {
+					out_objects[write_idx++] = std::move(buffer[i]);
+				}
+			}
+			
+			// Update head to tail in ONE atomic operation
+			// This marks all items as "read" instantly
+			head.store(current_tail, std::memory_order_release);
+			
+			return true;
+		}
+		
+		// Check if buffer is empty
+		bool empty() const {
+			return head.load(std::memory_order_relaxed) == tail.load(std::memory_order_acquire);
+		}
+	};
+	
+	static constexpr size_t MAX_THREADS = 128;
+	static constexpr size_t BUFFER_CAPACITY = 256;
+	
+	std::array<ThreadLocalBuffer, MAX_THREADS> m_threadBuffers;
+	std::atomic<size_t> m_nThreadCount;
+	std::thread m_threadLRUUpdate;
+	std::atomic<bool> m_bStopLRU;
+#endif //__CONCURRENT__
+
 	ObjectTypePtr m_ptrHead;
 	ObjectTypePtr m_ptrTail;
 
@@ -97,6 +246,13 @@ public:
 	~LRUCache()
 	{
 #ifdef __CONCURRENT__
+		// Stop LRU update thread first
+		m_bStopLRU.store(true, std::memory_order_release);
+		if (m_threadLRUUpdate.joinable()) {
+			m_threadLRUUpdate.join();
+		}
+		
+		// Then stop cache flush thread
 		m_bStop = true;
 		m_threadCacheFlush.join();
 #endif //__CONCURRENT__
@@ -119,6 +275,10 @@ public:
 		, m_ptrTail(nullptr)
 		, m_nUsedCacheCapacity(0)
 		, m_nCacheCapacity(nCapacity)
+#ifdef __CONCURRENT__
+		, m_nThreadCount(0)
+		, m_bStopLRU(false)
+#endif
 	{
 #ifdef __CACHE_COUNTERS__
 		// Reset thread-local stats when creating a new cache instance
@@ -132,6 +292,7 @@ public:
 #ifdef __CONCURRENT__
 		m_bStop = false;
 		m_threadCacheFlush = std::thread(handlerCacheFlush, this);
+		m_threadLRUUpdate = std::thread(handlerLRUUpdate, this);
 #endif //__CONCURRENT__
 	}
 
@@ -707,9 +868,28 @@ public:
 #endif //__SELECTIVE_UPDATE__
 
 #ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
-
+		// Filter valid objects into a temporary vector
+		std::vector<ObjectTypePtr> validObjects;
+		validObjects.reserve(vtObjects.size());
+		
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			auto& obj = *it;
+			if (obj != nullptr && obj->m_ptrCoreObject != nullptr)
+			{
+				validObjects.push_back(obj);
+			}
+		}
+		
+		// Get thread buffer index and push batch
+		if (!validObjects.empty())
+		{
+			size_t thread_idx = getThreadBufferIndex();
+			m_threadBuffers[thread_idx].pushBatch(validObjects);
+		}
+		
+		vtObjects.clear();
+#else //__CONCURRENT__
 		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
 		{
 			auto& obj = *it;
@@ -717,15 +897,11 @@ public:
 			if (obj != nullptr && obj->m_ptrCoreObject != nullptr)
 			{
 				moveToFront(obj);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
 		vtObjects.clear();
+#endif //__CONCURRENT__
 
 #ifndef __CONCURRENT__
 		size_t nObjectsLinkedList = 0;
@@ -771,9 +947,35 @@ public:
 #endif //__SELECTIVE_UPDATE__
 
 #ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
+		// Filter and flatten valid objects into a temporary vector
+		std::vector<ObjectTypePtr> validObjects;
+		validObjects.reserve(vtObjects.size() * 2);
+		
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			auto& lhs = (*it).first;
+			auto& rhs = (*it).second;
 
+			if (lhs != nullptr && lhs->m_ptrCoreObject != nullptr)
+			{
+				validObjects.push_back(lhs);
+			}
+
+			if (rhs != nullptr && rhs->m_ptrCoreObject != nullptr)
+			{
+				validObjects.push_back(rhs);
+			}
+		}
+		
+		// Get thread buffer index and push batch
+		if (!validObjects.empty())
+		{
+			size_t thread_idx = getThreadBufferIndex();
+			m_threadBuffers[thread_idx].pushBatch(validObjects);
+		}
+		
+		vtObjects.clear();
+#else //__CONCURRENT__
 		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
 		{
 			auto& lhs = (*it).first;
@@ -782,25 +984,16 @@ public:
 			if (lhs != nullptr && lhs->m_ptrCoreObject != nullptr)
 			{
 				moveToFront(lhs);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(lhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				lhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
-
 			}
 
 			if (rhs != nullptr && rhs->m_ptrCoreObject != nullptr)
 			{
 				moveToFront(rhs);
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(rhs->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				rhs->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
 		vtObjects.clear();
+#endif //__CONCURRENT__
 
 #ifndef __CONCURRENT__
 		size_t nObjectsLinkedList = 0;
@@ -855,9 +1048,39 @@ public:
 #endif //__SELECTIVE_UPDATE__
 
 #ifdef __CONCURRENT__
-		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
-
+		// Filter and flatten valid objects into a temporary vector
+		std::vector<ObjectTypePtr> validObjects;
+		validObjects.reserve(vtObjects.size() * 2);
+		
+		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
+		{
+			// Handle m_ptrToDiscard first (needs immediate removal)
+			if ((*it).m_ptrToDiscard != nullptr)
+			{
+				remove((*it).m_ptrToDiscard);
+			}
+			
+			// Collect valid objects for batch processing
+			if ((*it).m_ptrPrimary != nullptr && (*it).m_ptrPrimary->m_ptrCoreObject != nullptr)
+			{
+				validObjects.push_back((*it).m_ptrPrimary);
+			}
+			
+			if ((*it).m_ptrAffectedSibling != nullptr && (*it).m_ptrAffectedSibling->m_ptrCoreObject != nullptr)
+			{
+				validObjects.push_back((*it).m_ptrAffectedSibling);
+			}
+		}
+		
+		// Get thread buffer index and push batch
+		if (!validObjects.empty())
+		{
+			size_t thread_idx = getThreadBufferIndex();
+			m_threadBuffers[thread_idx].pushBatch(validObjects);
+		}
+		
+		vtObjects.clear();
+#else //__CONCURRENT__
 		for (auto it = vtObjects.rbegin(); it != vtObjects.rend(); it++)
 		{
 			for (int j = 2; j >= 0; j--)
@@ -881,15 +1104,11 @@ public:
 				if (obj == nullptr || obj->m_ptrCoreObject == nullptr) continue;
 
 				moveToFront(obj);
-
-#if defined(__CONCURRENT__) && defined(__TREE_WITH_CACHE__)
-				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
-				obj->m_nUseCounter.fetch_sub(1, std::memory_order_relaxed);
-#endif //__CONCURRENT__ && __TREE_WITH_CACHE__
 			}
 		}
 
 		vtObjects.clear();
+#endif //__CONCURRENT__
 
 #ifndef __CONCURRENT__
 		size_t nObjectsLinkedList = 0;
@@ -905,14 +1124,15 @@ public:
 
 	CacheErrorCode remove(ObjectTypePtr& ptrObject)
 	{
-#ifdef __CONCURRENT__
-		//std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
-#endif //__CONCURRENT__
-
 		if (ptrObject->m_uid.getMediaType() > 1)
 		{
 			m_ptrStorage->remove(ptrObject->m_uid);
 		}
+
+#ifdef __CONCURRENT__
+		//std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
+		// BUG: enable thissssss !!
+#endif //__CONCURRENT__
 
 		removeFromLRU(ptrObject);
 
@@ -927,20 +1147,6 @@ public:
 		m_ptrStorage->getObject(nDegree, uidObject, ptrObject);
 
 		ASSERT(ptrObject->m_ptrCoreObject != nullptr && "The requested object does not exist.");
-
-#ifdef __COST_WEIGHTED_EVICTION__
-		// Capture the cost of accessing this object from storage (only for BiStorage)
-		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
-		{
-			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
-			ptrObject->setObjectCost(accessCost);
-		}
-		else
-		{
-			// For non-BiStorage, use default cost of 1
-			ptrObject->setObjectCost(1);
-		}
-#endif
 
 #ifdef __CONCURRENT__
 		m_nUsedCacheCapacity.fetch_add(1, std::memory_order_relaxed);
@@ -975,20 +1181,6 @@ public:
 		uidObject.createUIDFromVolatilePointer((uint8_t)Type::UID, reinterpret_cast<uintptr_t>(ptrObject));
 
 		ptrObject->m_uid = uidObject;
-
-#ifdef __COST_WEIGHTED_EVICTION__
-		// Set cost for newly created objects (only for BiStorage)
-		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
-		{
-			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
-			ptrObject->setObjectCost(accessCost);
-		}
-		else
-		{
-			// For non-BiStorage, use default cost of 1
-			ptrObject->setObjectCost(1);
-		}
-#endif
 
 #ifdef __CONCURRENT__
 		m_nUsedCacheCapacity.fetch_add(1, std::memory_order_relaxed);
@@ -1166,123 +1358,6 @@ private:
 
 	}
 
-#ifdef __COST_WEIGHTED_EVICTION__
-	/**
-	 * @brief Unlink a node from any position in the doubly-linked list
-	 * 
-	 * This helper handles removing a node from head, middle, or tail positions.
-	 * Does NOT decrement m_nUsedCacheCapacity (caller's responsibility).
-	 * 
-	 * @param ptrNode The node to unlink
-	 */
-	inline void unlinkNode(ObjectTypePtr ptrNode)
-	{
-		if (!ptrNode) return;
-
-		ObjectTypePtr prev = ptrNode->m_ptrPrev;
-		ObjectTypePtr next = ptrNode->m_ptrNext;
-
-		// Case 1: Node is both head and tail (only element)
-		if (ptrNode == m_ptrHead && ptrNode == m_ptrTail)
-		{
-			m_ptrHead = nullptr;
-			m_ptrTail = nullptr;
-		}
-		// Case 2: Node is head
-		else if (ptrNode == m_ptrHead)
-		{
-			m_ptrHead = next;
-			if (next)
-			{
-				next->m_ptrPrev = nullptr;
-			}
-		}
-		// Case 3: Node is tail
-		else if (ptrNode == m_ptrTail)
-		{
-			m_ptrTail = prev;
-			if (prev)
-			{
-				prev->m_ptrNext = nullptr;
-			}
-		}
-		// Case 4: Node is in the middle
-		else
-		{
-			if (prev)
-			{
-				prev->m_ptrNext = next;
-			}
-			if (next)
-			{
-				next->m_ptrPrev = prev;
-			}
-		}
-
-		// Clear the removed node's pointers
-		ptrNode->m_ptrNext = nullptr;
-		ptrNode->m_ptrPrev = nullptr;
-	}
-
-	/**
-	 * @brief Find eviction victim using cost-weighted strategy for BiStorage
-	 * 
-	 * Strategy for BiStorage (two-tier costs):
-	 * - Compare tail with its predecessor
-	 * - Evict whichever has LOWER cost (cheaper to re-fetch)
-	 * - If tail has lower cost → evict tail
-	 * - If predecessor has lower cost → evict predecessor
-	 * - If costs are equal → evict tail (LRU default)
-	 * 
-	 * This prefers evicting cheap objects (IndexNodes) over expensive ones (DataNodes)
-	 * 
-	 * @return Pointer to the victim node, or nullptr if no victim found
-	 */
-	inline ObjectTypePtr findVictimByCostRatio()
-	{
-		if (!m_ptrTail) return nullptr;
-
-		ObjectTypePtr tail = m_ptrTail;
-		ObjectTypePtr predecessor = m_ptrTail->m_ptrPrev;
-
-#ifdef __CONCURRENT__
-		// If tail is in use, can't evict it
-		if (tail->m_nUseCounter.load(std::memory_order_relaxed) > 0)
-		{
-			return nullptr; // Let caller handle this
-		}
-#endif
-
-		// If no predecessor, must evict tail
-		if (!predecessor)
-		{
-			return tail;
-		}
-
-#ifdef __CONCURRENT__
-		// If predecessor is in use, evict tail
-		if (predecessor->m_nUseCounter.load(std::memory_order_relaxed) > 0)
-		{
-			return tail;
-		}
-#endif
-
-		uint64_t tailCost = tail->getObjectCost();
-		uint64_t predCost = predecessor->getObjectCost();
-
-		// Evict whichever has lower cost (cheaper to re-fetch)
-		// If costs are equal, prefer tail (LRU default)
-		if (tailCost <= predCost)
-		{
-			return tail;
-		}
-		else
-		{
-			return predecessor;
-		}
-	}
-#endif // __COST_WEIGHTED_EVICTION__
-
 	inline void flushItemsToStorage()
 	{
 #ifdef __CONCURRENT__
@@ -1298,40 +1373,6 @@ private:
 		int nFlushCount = nUsedCacheCapacity - m_nCacheCapacity;
 		for (; nFlushCount > 0; nFlushCount--)
 		{
-#ifdef __COST_WEIGHTED_EVICTION__
-			// Use cost-weighted victim selection
-			ObjectTypePtr ptrItemToFlush = findVictimByCostRatio();
-			
-			if (!ptrItemToFlush) break;  // No victim found (all in use)
-			
-			if (!ptrItemToFlush->m_mtx.try_lock()) break;
-			
-			if (ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) != 0)
-			{
-				ptrItemToFlush->m_mtx.unlock();
-				break;
-			}
-
-			// Check if this is an IndexNode and has dirty dependents in cache
-			// If it does, we cannot evict it yet (children must be flushed first)
-			if (ptrItemToFlush->_havedependentsincache())
-			{
-				ptrItemToFlush->m_mtx.unlock();
-				break;
-			}
-
-			ASSERT(ptrItemToFlush->m_ptrCoreObject != nullptr);
-
-			vtObjects.push_back(ptrItemToFlush);
-
-			// Unlink the victim from the list (could be tail or predecessor)
-			unlinkNode(ptrItemToFlush);
-
-			m_nUsedCacheCapacity.fetch_sub(1, std::memory_order_relaxed);
-
-			ASSERT(ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) == 0);
-#else
-			// Traditional LRU: always evict tail
 			//auto nUseCounter = m_ptrTail->m_nUseCounter.load(std::memory_order_relaxed);
 			//ASSERT(nUseCounter >= 0);
 
@@ -1377,7 +1418,6 @@ private:
 			m_nUsedCacheCapacity.fetch_sub(1, std::memory_order_relaxed);
 
 			ASSERT(ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) == 0);
-#endif // __COST_WEIGHTED_EVICTION__
 		}
 
 		lock_cache.unlock();
@@ -1420,49 +1460,6 @@ private:
 #else //__CONCURRENT__
 		while (m_nUsedCacheCapacity > m_nCacheCapacity)
 		{
-#ifdef __COST_WEIGHTED_EVICTION__
-			// Use cost-weighted victim selection
-			ObjectTypePtr ptrTemp = findVictimByCostRatio();
-			
-			ASSERT(ptrTemp != nullptr);
-
-			// Check if this is an IndexNode and has dirty dependents in cache
-			// If it does, we cannot evict it yet (children must be flushed first)
-			if (ptrTemp->_havedependentsincache())
-			{
-				break;
-			}
-
-			bool is_dirty = ptrTemp->hasUpdatesToBeFlushed();
-			if (is_dirty) //check for uidupdated and uid in the cache object and reset uidupdated once used!!!
-			{
-				ObjectUIDType uidUpdated;
-				if (m_ptrStorage->addObject(ptrTemp, uidUpdated) != CacheErrorCode::Success)
-				{
-					std::cout << "Critical State: Failed to add object to Storage." << std::endl;
-					throw new std::logic_error(".....");   // TODO: critical log.
-				}
-
-				ptrTemp->m_uidUpdated = uidUpdated;
-			}
-
-#ifdef __CACHE_COUNTERS__
-			// Record eviction with dirty flag
-			this->recordEviction(is_dirty);
-#endif
-
-			// Unlink the victim from the list (could be tail or predecessor)
-			unlinkNode(ptrTemp);
-
-			// Call custom deletion logic and release the pointer
-			ptrTemp->m_bDirty = false;
-			ptrTemp->deleteCoreObject();
-			ptrTemp = nullptr;
-
-			ASSERT(m_nUsedCacheCapacity != 0);
-			m_nUsedCacheCapacity--;
-#else
-			// Traditional LRU: always evict tail
 			ASSERT(m_ptrTail != nullptr);
 
 			bool is_dirty = m_ptrTail->hasUpdatesToBeFlushed();
@@ -1513,7 +1510,6 @@ private:
 
 			ASSERT(m_nUsedCacheCapacity != 0);
 			m_nUsedCacheCapacity--;
-#endif // __COST_WEIGHTED_EVICTION__
 		}
 #endif //__CONCURRENT__
 	}
@@ -1684,6 +1680,109 @@ public:
 	}
 
 #ifdef __CONCURRENT__
+	// Get thread-local buffer index with caching
+	inline size_t getThreadBufferIndex()
+	{
+		thread_local size_t cached_index = std::numeric_limits<size_t>::max();
+		
+		if (cached_index == std::numeric_limits<size_t>::max())
+		{
+			cached_index = m_nThreadCount.fetch_add(1, std::memory_order_acq_rel);
+			ASSERT(cached_index < MAX_THREADS);
+		}
+		
+		return cached_index;
+	}
+
+	// Background thread handler for LRU metadata updates
+	static void handlerLRUUpdate(SelfType* ptrSelf)
+	{
+		size_t round_robin_idx = 0;
+		
+		while (!ptrSelf->m_bStopLRU.load(std::memory_order_acquire))
+		{
+			bool did_work = false;
+			
+			// Get current number of registered threads
+			size_t num_threads = ptrSelf->m_nThreadCount.load(std::memory_order_acquire);
+			
+			// If no threads registered yet, sleep and continue
+			if (num_threads == 0)
+			{
+				std::this_thread::sleep_for(std::chrono::microseconds(10));
+				continue;
+			}
+			
+			// Acquire lock once for this iteration
+			std::unique_lock<std::shared_mutex> lock_cache(ptrSelf->m_mtxCache);
+			
+			// Reusable batch vector to avoid repeated allocations
+			std::vector<ObjectTypePtr> batch_objects;
+			
+			// Process each registered thread's buffer (round-robin for fairness)
+			for (size_t i = 0; i < num_threads; ++i)
+			{
+				size_t thread_idx = (round_robin_idx + i) % num_threads;
+				auto& buffer = ptrSelf->m_threadBuffers[thread_idx];
+				
+				// Pop all pending objects from this buffer in one atomic operation
+				if (buffer.popBatch(batch_objects))
+				{
+					did_work = true;
+					
+					// Process all objects in the batch
+					for (ObjectTypePtr obj : batch_objects)
+					{
+						// Call moveToFront for this object
+						ptrSelf->moveToFront(obj);
+						
+						// Decrement use counter
+						obj->m_nUseCounter.fetch_sub(1, std::memory_order_release);
+					}
+					
+					// Clear for reuse in next iteration
+					batch_objects.clear();
+				}
+			}
+			
+			// Update round-robin index for next iteration
+			if (num_threads > 0)
+			{
+				round_robin_idx = (round_robin_idx + 1) % num_threads;
+			}
+			
+			// Release lock
+			lock_cache.unlock();
+			
+			// If no work was done, sleep briefly to avoid busy-waiting
+			if (!did_work)
+			{
+				std::this_thread::sleep_for(std::chrono::microseconds(10));
+			}
+		}
+		
+		// Final drain on shutdown - process all remaining objects
+		std::unique_lock<std::shared_mutex> lock_cache(ptrSelf->m_mtxCache);
+		
+		std::vector<ObjectTypePtr> batch_objects;
+		size_t num_threads = ptrSelf->m_nThreadCount.load(std::memory_order_acquire);
+		for (size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx)
+		{
+			auto& buffer = ptrSelf->m_threadBuffers[thread_idx];
+			
+			// Drain all remaining objects using batch pop
+			while (buffer.popBatch(batch_objects))
+			{
+				for (ObjectTypePtr obj : batch_objects)
+				{
+					ptrSelf->moveToFront(obj);
+					obj->m_nUseCounter.fetch_sub(1, std::memory_order_release);
+				}
+				batch_objects.clear();
+			}
+		}
+	}
+
 	static void handlerCacheFlush(SelfType* ptrSelf)
 	{
 		do

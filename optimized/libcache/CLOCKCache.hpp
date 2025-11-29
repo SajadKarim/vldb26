@@ -314,11 +314,7 @@ public:
 				ASSERT(!m_vtClockBuffer[m_nClockHand]);
 
 				m_vtClockBuffer[m_nClockHand] = obj;
-#ifdef __COST_WEIGHTED_EVICTION__
-				m_vtClockBufferWeight[m_nClockHand] = nLevel + obj->getObjectCost();
-#else
 				m_vtClockBufferWeight[m_nClockHand] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
 
 				obj->m_nPositionInCLOCK = m_nClockHand;
 			}
@@ -334,12 +330,7 @@ public:
 			}
 #endif //__CONCURRENT__
 
-#ifdef __COST_WEIGHTED_EVICTION__
-			m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel + obj->getObjectCost();
-#else
-			m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
-			nLevel++;
+			m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel++;
 		}
 
 		vtObjects.clear();
@@ -437,20 +428,12 @@ public:
 					ASSERT(!m_vtClockBuffer[m_nClockHand]);
 
 					m_vtClockBuffer[m_nClockHand] = obj;
-#ifdef __COST_WEIGHTED_EVICTION__
-					m_vtClockBufferWeight[m_nClockHand] = nLevel + obj->getObjectCost();
-#else
 					m_vtClockBufferWeight[m_nClockHand] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
 
 					obj->m_nPositionInCLOCK = m_nClockHand;
 				}
 
-#ifdef __COST_WEIGHTED_EVICTION__
-				m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel + obj->getObjectCost();
-#else
 				m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
@@ -611,20 +594,12 @@ public:
 					ASSERT(!m_vtClockBuffer[m_nClockHand]);
 
 					m_vtClockBuffer[m_nClockHand] = obj;
-#ifdef __COST_WEIGHTED_EVICTION__
-					m_vtClockBufferWeight[m_nClockHand] = nLevel + obj->getObjectCost();
-#else
 					m_vtClockBufferWeight[m_nClockHand] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
 
 					obj->m_nPositionInCLOCK = m_nClockHand;
 				}
 
-#ifdef __COST_WEIGHTED_EVICTION__
-				m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel + obj->getObjectCost();
-#else
 				m_vtClockBufferWeight[obj->m_nPositionInCLOCK] = nLevel;
-#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 				ASSERT(obj->m_nUseCounter.load(std::memory_order_relaxed) > 0);
@@ -660,19 +635,6 @@ public:
 		m_ptrStorage->getObject(nDegree, uidObject, ptrObject);
 
 		ASSERT(ptrObject->m_ptrCoreObject != nullptr && "The requested object does not exist.");
-
-#ifdef __COST_WEIGHTED_EVICTION__
-		// Capture the cost of accessing this object from storage
-		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
-		{
-			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
-			ptrObject->setObjectCost(accessCost);
-		}
-		else
-		{
-			ptrObject->setObjectCost(1);  // Fallback
-		}
-#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 		m_nUsedCacheCapacity.fetch_add(1, std::memory_order_relaxed);

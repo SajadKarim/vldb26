@@ -35,12 +35,8 @@ public:
 
 	SelfTypePtr m_ptrPrev;
 	SelfTypePtr m_ptrNext;
-int32_t m_nPositionInCLOCK = -1;
-	bool m_bMarkDelete;
 
-#ifdef __COST_WEIGHTED_EVICTION__
-	uint64_t m_nObjectCost;  // Cost to re-fetch this object from storage
-#endif //__COST_WEIGHTED_EVICTION__
+	bool m_bMarkDelete;
 
 #ifdef __CONCURRENT__
 	std::shared_mutex m_mtx;
@@ -238,60 +234,4 @@ public:
 		}
 		}
 	}
-
-#ifdef __COST_WEIGHTED_EVICTION__
-	inline uint64_t getObjectCost() const
-	{
-		return m_nObjectCost;
-	}
-
-	inline void setObjectCost(uint64_t nCost)
-	{
-		m_nObjectCost = nCost;
-	}
-
-	inline bool havedependentsincache()
-	{
-		switch (m_nCoreObjectType)
-		{
-		case DataNode::UID:
-		{
-			return false;
-			//return reinterpret_cast<DataNode*>(m_ptrCoreObject)->hasUIDUpdates();
-		}
-		case IndexNode::UID:
-		{
-			return reinterpret_cast<IndexNode*>(m_ptrCoreObject)->havedependentsincache();
-		}
-		default:
-		{
-			std::cout << "Unknown Object Found." << std::endl;
-			throw new std::logic_error("Unknown Object Found.");
-		}
-		}
-	}
-
-
-	inline bool _havedependentsincache()
-	{
-		switch (m_nCoreObjectType)
-		{
-		case DataNode::UID:
-		{
-			return false;
-			//return reinterpret_cast<DataNode*>(m_ptrCoreObject)->hasUIDUpdates();
-		}
-		case IndexNode::UID:
-		{
-			return reinterpret_cast<IndexNode*>(m_ptrCoreObject)->_havedependentsincache();
-		}
-		default:
-		{
-			std::cout << "Unknown Object Found." << std::endl;
-			throw new std::logic_error("Unknown Object Found.");
-		}
-		}
-	}
-#endif //__COST_WEIGHTED_EVICTION__
-	
 };

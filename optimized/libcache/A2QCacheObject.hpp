@@ -44,10 +44,6 @@ public:
 	bool m_bIsDowgraded;
 	uint8_t m_nQueueType;
 
-#ifdef __COST_WEIGHTED_EVICTION__
-	uint64_t m_nObjectCost;  // Cost to re-fetch this object from storage
-#endif //__COST_WEIGHTED_EVICTION__
-
 public:
 	~A2QCacheObject()
 	{
@@ -176,15 +172,6 @@ public:
 
 	inline void serialize(char*& szData, uint32_t& nDataLen, uint16_t nBlockSize, void*& ptrBlockAppendOffset, bool& bAlignedAllocation) const
 	{
-		if (m_ptrCoreObject == nullptr)
-		{
-			std::cout << "ERROR: Attempting to serialize A2QCacheObject with null core object!" << std::endl;
-			std::cout << "  m_bDirty: " << m_bDirty << std::endl;
-			std::cout << "  m_nCoreObjectType: " << (int)m_nCoreObjectType << std::endl;
-			std::cout << "  m_uid: " << m_uid.getPersistentPointerValue() << std::endl;
-			throw std::logic_error("Cannot serialize A2QCacheObject with null core object");
-		}
-
 		switch (m_nCoreObjectType)
 		{
 			case DataNode::UID:
@@ -252,16 +239,4 @@ public:
 		}
 		}
 	}
-
-#ifdef __COST_WEIGHTED_EVICTION__
-	inline uint64_t getObjectCost() const
-	{
-		return m_nObjectCost;
-	}
-
-	inline void setObjectCost(uint64_t nCost)
-	{
-		m_nObjectCost = nCost;
-	}
-#endif //__COST_WEIGHTED_EVICTION__
 };

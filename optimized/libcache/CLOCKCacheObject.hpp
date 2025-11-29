@@ -38,10 +38,6 @@ public:
 
 	int32_t m_nPositionInCLOCK;
 
-#ifdef __COST_WEIGHTED_EVICTION__
-	uint64_t m_nObjectCost;  // Cost to refetch this object from storage
-#endif //__COST_WEIGHTED_EVICTION__
-
 	//int* reftofirstiteminpair;
 	bool m_bMarkDelete;
 
@@ -64,9 +60,6 @@ public:
 #endif //__CONCURRENT__
 		, m_bMarkDelete(false)
 		, m_nPositionInCLOCK( -1)
-#ifdef __COST_WEIGHTED_EVICTION__
-		, m_nObjectCost(1)  // Default cost
-#endif //__COST_WEIGHTED_EVICTION__
 		, m_uidUpdated(std::nullopt)
 	{
 		m_ptrCoreObject = ptrCoreObject;
@@ -81,9 +74,6 @@ public:
 #endif //__CONCURRENT__
 		, m_bMarkDelete(false)
 		, m_nPositionInCLOCK(-1)
-#ifdef __COST_WEIGHTED_EVICTION__
-		, m_nObjectCost(1)  // Will be set after deserialization
-#endif //__COST_WEIGHTED_EVICTION__
 		, m_uidUpdated(std::nullopt)
 	{
 		m_nCoreObjectType = szBuffer[0];
@@ -282,9 +272,4 @@ public:
 		}
 		}
 	}
-
-#ifdef __COST_WEIGHTED_EVICTION__
-	inline uint64_t getObjectCost() const { return m_nObjectCost; }
-	inline void setObjectCost(uint64_t cost) { m_nObjectCost = cost; }
-#endif //__COST_WEIGHTED_EVICTION__
 };

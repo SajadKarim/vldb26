@@ -31,31 +31,20 @@ echo "YCSB Cache Profiling Results Directory: $PROFILE_OUTPUT_DIR"
 echo "=========================================="
 
 # Cache-specific configuration arrays
-CACHE_TYPES=("LRU" "A2Q" "CLOCK")
-STORAGE_TYPES=("VolatileStorage" "PMemStorage" "FileStorage")
-CACHE_SIZE_PERCENTAGES=("2%" "10%", "25%")  # Cache sizes as percentages of estimated B+ tree pages
+CACHE_TYPES=("LRU" "A2Q")
+STORAGE_TYPES=("VolatileStorage")
+CACHE_SIZE_PERCENTAGES=("15%")  # Cache sizes as percentages of estimated B+ tree pages
 PAGE_SIZES=(4096)
 MEMORY_SIZES=(34359738368) #(2147483648)  # 512MB, 1GB, 2GB
-
-# BiStorage-specific configuration
-# Primary storage configuration
-BISTORAGE_PRIMARY_STORAGE="VolatileStorage"
-BISTORAGE_PRIMARY_READ_COST=10
-BISTORAGE_PRIMARY_WRITE_COST=10
-
-# Secondary storage configuration
-BISTORAGE_SECONDARY_STORAGE="PMemStorage"
-BISTORAGE_SECONDARY_READ_COST=300
-BISTORAGE_SECONDARY_WRITE_COST=300
 
 # Tree types to test (focus on main ones for cache testing)
 TREES=("BplusTreeSOA")
 
 # Degrees to test (subset for cache profiling)
-DEGREES=(24)
+DEGREES=(32)
 
 # YCSB Workloads to profile
-YCSB_WORKLOADS=("ycsb_a" "ycsb_b" "ycsb_c" "ycsb_d" "ycsb_e" "ycsb_f")
+YCSB_WORKLOADS=("ycsb_c")
 
 # Key-Value type combinations (only implemented combinations)
 declare -A KEY_VALUE_COMBOS
@@ -65,13 +54,12 @@ KEY_VALUE_COMBOS["uint64_t_uint64_t"]="uint64_t uint64_t"
 
 # Record count for profiling
 RECORDS=(500000)
-RUNS=${RUNS:-5}  # Default to 5, but allow override via environment variable
-THREADS=(1)
+RUNS=${RUNS:-10}  # Default to 5, but allow override via environment variable
+THREADS=(1 2 5 20 40)
 #THREADS=(4)
 
 # Data directory configuration
-# Use environment variable if set, otherwise default to ~/benchmark_data
-DATA_BASE_DIR="${BENCHMARK_DATA_DIR:-/tmp/benchmark_data}"
+DATA_BASE_DIR="/tmp/benchmark_data"
 DATA_DIR="$DATA_BASE_DIR/data"
 YCSB_DIR="$DATA_BASE_DIR/ycsb"
 
@@ -170,7 +158,7 @@ ensure_benchmark_data() {
 
 # Function to build with cache support
 build_cache_configuration() {
-    #return
+    return
 
     local config_type=$1  # "basic" or "concurrent"
     
@@ -421,8 +409,11 @@ run_full_ycsb_cache_profiling_with_params() {
                                                 ((current_combination++))
                                                 echo "Progress: $current_combination/$total_combinations ($config_id)"
                                                 
+                                                #for i in {1..5}; do
                                                 run_ycsb_profiled_benchmark "$tree" "$cache_type" "$storage_type" "$actual_cache_size" "$page_size" "$memory_size" "$key_type" "$value_type" "$workload" "$degree" "$records" "$config_id" "$thread_count" "$cache_size_percentage"
-                                                
+                                                sleep 2
+                                                #done
+
                                                 # Small delay between runs to let system settle
                                                 #sleep 5
                                             done
@@ -624,7 +615,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_default"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -632,7 +623,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_default"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     # Create a local single-threaded array
     local SINGLE_THREADS=(1)
@@ -642,7 +633,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
     
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -650,7 +641,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -658,7 +649,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
     
     local CACHE_TYPES_LOCAL=("LRU")
 
@@ -666,7 +657,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local config_type="non_concurrent_lru_metadata_update_in_order_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -674,7 +665,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local config_type="non_concurrent_a2q_ghost_q_enabled_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     echo "Running multi-threaded YCSB cache profiling..."
     echo "Using threads: ${THREADS[*]}"
@@ -730,7 +721,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Running multi-threaded YCSB cache profiling (extended)..."
     
     local config_type="concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("LRU")
 
@@ -738,7 +729,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local config_type="concurrent_lru_metadata_update_in_order_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -746,7 +737,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local config_type="concurrent_a2q_ghost_q_enabled_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -891,8 +882,8 @@ combine_csv_files() {
 # Main script logic
 case "${1:-full}" in
     "full")
-        run_full_ycsb_cache_profiling_single_threaded
-        #run_full_ycsb_cache_profiling_multi_threaded
+        #run_full_ycsb_cache_profiling_single_threaded
+        run_full_ycsb_cache_profiling_multi_threaded
         echo ""
         echo "=========================================="
         echo "Combining CSV files with perf data..."

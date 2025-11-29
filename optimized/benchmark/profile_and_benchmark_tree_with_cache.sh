@@ -30,20 +30,9 @@ echo "=========================================="
 # Cache-specific configuration arrays
 CACHE_TYPES=("LRU" "A2Q" "CLOCK")
 STORAGE_TYPES=("VolatileStorage" "FileStorage" "PMemStorage")
-CACHE_SIZE_PERCENTAGES=("2%" "10%", "25%")  # Cache sizes as percentages of estimated B+ tree pages
+CACHE_SIZE_PERCENTAGES=("5%" "15%" "25%")  # Cache sizes as percentages of estimated B+ tree pages
 PAGE_SIZES=(4096)
 MEMORY_SIZES=(34359738368) #(2147483648)  # 512MB, 1GB, 2GB
-
-# BiStorage-specific configuration
-# Primary storage configuration
-BISTORAGE_PRIMARY_STORAGE="VolatileStorage"
-BISTORAGE_PRIMARY_READ_COST=10
-BISTORAGE_PRIMARY_WRITE_COST=10
-
-# Secondary storage configuration
-BISTORAGE_SECONDARY_STORAGE="PMemStorage"
-BISTORAGE_SECONDARY_READ_COST=300
-BISTORAGE_SECONDARY_WRITE_COST=300
 
 # Tree types to test (focus on main ones for cache testing)
 TREES=("BplusTreeSOA")
@@ -52,7 +41,7 @@ TREES=("BplusTreeSOA")
 DEGREES=(24)
 
 # Operations to profile
-OPERATIONS=("search_zipfian")
+OPERATIONS=("insert" "search_random" "search_sequential" "search_uniform" "search_zipfian" "delete")
 
 # Key-Value type combinations (only implemented combinations)
 declare -A KEY_VALUE_COMBOS
@@ -62,7 +51,7 @@ KEY_VALUE_COMBOS["uint64_t_uint64_t"]="uint64_t uint64_t"
 
 # Record count for profiling
 RECORDS=(500000)
-RUNS=${RUNS:-1}  # Default to 3, but allow override via environment variable
+RUNS=${RUNS:-5}  # Default to 3, but allow override via environment variable
 #THREADS=(2 4 8 12 16 20 24 28 32 36 40)
 THREADS=(4 8)
 
@@ -366,108 +355,6 @@ run_cache_profiled_benchmark() {
     echo ""
 }
 
-# Function to run single BiStorage benchmark with perf profiling
-run_bistorage_cache_profiled_benchmark() {
-    local tree_type=$1
-    local cache_type=$2
-    local primary_type=$3
-    local secondary_type=$4
-    local cache_size=$5
-    local page_size=$6
-    local memory_size=$7
-    local key_type=$8
-    local value_type=$9
-    local operation=${10}
-    local degree=${11}
-    local records=${12}
-    local config_name=${13}
-    local thread_count=${14}
-    local cache_size_percentage=${15}
-    local primary_read_cost=${16}
-    local primary_write_cost=${17}
-    local secondary_read_cost=${18}
-    local secondary_write_cost=${19}
-    
-    # Construct storage name from primary and secondary types
-    local storage_name="BiStorage_${primary_type}_${secondary_type}"
-    
-    local profile_name="${tree_type}_${cache_type}_${storage_name}_${cache_size}_${page_size}_${memory_size}_${key_type}_${value_type}_${operation}_${degree}_${records}_threads${thread_count}"
-    
-    # Create a separate folder for this individual run
-    local run_folder="$PROFILE_OUTPUT_DIR/${config_name}_${profile_name}"
-    mkdir -p "$run_folder"
-    
-    local perf_output="$run_folder/${config_name}_${profile_name}.prf"
-    local perf_data="$run_folder/${config_name}_${profile_name}.data"
-    
-    echo "=========================================="
-    echo "BiStorage Cache Profiling: $tree_type - $operation - Degree $degree"
-    echo "Cache: $cache_type (Size: $cache_size)"
-    echo "Primary Storage: $primary_type"
-    echo "Secondary Storage: $secondary_type"
-    echo "Page Size: $page_size, Memory Size: $memory_size"
-    echo "Key: $key_type, Value: $value_type, Records: $records"
-    echo "Threads: $thread_count"
-    echo "Costs - Primary R/W: $primary_read_cost/$primary_write_cost ns"
-    echo "Costs - Secondary R/W: $secondary_read_cost/$secondary_write_cost ns"
-    echo "Run Folder: $run_folder"
-    echo "Output: $perf_output"
-    echo "=========================================="
-    
-    # Ensure benchmark data exists and is accessible
-    ensure_benchmark_data
-    
-    # Set up data path for benchmark execution
-    cd "$DATA_BASE_DIR"
-    
-    # Run benchmark with perf stat (statistical profiling)
-    # Note: Storage paths are defined in common.h and used internally by the benchmark
-    perf stat -e "$PERF_EVENTS" \
-              -o "$perf_output" \
-              numactl --cpunodebind=0 --membind=0 \
-              "$BENCHMARK_EXEC" \
-              --config "bm_cache_bistorage" \
-              --cache-type "$cache_type" \
-              --primary-storage-type "$primary_type" \
-              --secondary-storage-type "$secondary_type" \
-              --primary-read-cost "$primary_read_cost" \
-              --primary-write-cost "$primary_write_cost" \
-              --secondary-read-cost "$secondary_read_cost" \
-              --secondary-write-cost "$secondary_write_cost" \
-              --cache-size "$cache_size" \
-              --page-size "$page_size" \
-              --memory-size "$memory_size" \
-              --tree-type "$tree_type" \
-              --key-type "$key_type" \
-              --value-type "$value_type" \
-              --operation "$operation" \
-              --degree "$degree" \
-              --records "$records" \
-              --runs "$RUNS" \
-              --threads "$thread_count" \
-              --output-dir "$run_folder" \
-              --config-name "$config_name" \
-              --cache-size-percentage "$cache_size_percentage" \
-              --cache-page-limit "$cache_size"
-    
-    # Rename the CSV file to match the perf file naming convention
-    local latest_csv=$(ls -t "$run_folder"/benchmark_bistorage_*.csv 2>/dev/null | head -1)
-    if [ -f "$latest_csv" ]; then
-        local target_csv="$run_folder/${config_name}_${profile_name}.csv"
-        mv "$latest_csv" "$target_csv"
-        echo "CSV file renamed to: $(basename "$target_csv")"
-    fi
-    
-    echo "BiStorage cache profiling completed for $profile_name"
-    
-    # Return to benchmark directory
-    cd "$BENCHMARK_DIR" > /dev/null
-    
-    # Brief sleep to let system settle between benchmarks
-    sleep 2
-    echo ""
-}
-
 # Function to run comprehensive cache profiling with custom parameters
 run_full_cache_profiling_with_params() {
     local config_type=${1:-"basic"}  # "basic" or "concurrent"
@@ -750,194 +637,6 @@ run_full_cache_profiling_multi_threaded_ex() {
 
     local config_type="concurrent_clock_buffer_enabled_and_relaxed"    
     run_full_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" THREADS
-}
-
-# BiStorage-specific profiling functions
-
-# Function to run comprehensive BiStorage cache profiling with custom parameters
-run_full_bistorage_cache_profiling_with_params() {
-    local config_type=${1:-"basic"}  # "basic" or "concurrent"
-    local -n cache_types_ref=$2
-    local primary_storage=$3
-    local primary_read_cost=$4
-    local primary_write_cost=$5
-    local secondary_storage=$6
-    local secondary_read_cost=$7
-    local secondary_write_cost=$8
-    local -n cache_size_percentages_ref=$9
-    local -n page_sizes_ref=${10}
-    local -n memory_sizes_ref=${11}
-    local -n trees_ref=${12}
-    local -n degrees_ref=${13}
-    local -n operations_ref=${14}
-    local -n key_value_combos_ref=${15}
-    local -n records_ref=${16}
-    local config_suffix=${17:-""}
-    local -n threads_ref=${18:-THREADS}
-    
-    echo "Starting comprehensive BiStorage cache profiling for $config_type configuration${config_suffix:+ ($config_suffix)}..."
-    echo "Cache Types: ${cache_types_ref[*]}"
-    echo "Primary Storage: $primary_storage (R/W costs: $primary_read_cost/$primary_write_cost ns)"
-    echo "Secondary Storage: $secondary_storage (R/W costs: $secondary_read_cost/$secondary_write_cost ns)"
-    echo "Cache Size Percentages: ${cache_size_percentages_ref[*]}"
-    echo "Page Sizes: ${page_sizes_ref[*]}"
-    echo "Memory Sizes: ${memory_sizes_ref[*]}"
-    echo "Trees: ${trees_ref[*]}"
-    echo "Degrees: ${degrees_ref[*]}"
-    echo "Operations: ${operations_ref[*]}"
-    echo "Records: ${records_ref[*]}"
-    echo "Threads: ${threads_ref[*]}"
-    echo ""
-    
-    # Build the appropriate configuration
-    build_cache_configuration "$config_type"
-
-    local total_combinations=0
-    local current_combination=0
-    
-    # Calculate total combinations
-    for combo_name in "${!key_value_combos_ref[@]}"; do
-        IFS=' ' read -r key_type value_type <<< "${key_value_combos_ref[$combo_name]}"
-        for tree in "${trees_ref[@]}"; do
-            for cache_type in "${cache_types_ref[@]}"; do
-                for cache_size_percentage in "${cache_size_percentages_ref[@]}"; do
-                    for page_size in "${page_sizes_ref[@]}"; do
-                        for memory_size in "${memory_sizes_ref[@]}"; do
-                            for degree in "${degrees_ref[@]}"; do
-                                for operation in "${operations_ref[@]}"; do
-                                    for records in "${records_ref[@]}"; do
-                                        for thread_count in "${threads_ref[@]}"; do
-                                            ((total_combinations++))
-                                        done
-                                    done
-                                done
-                            done
-                        done
-                    done
-                done
-            done
-        done
-    done
-    
-    echo "Total BiStorage combinations to profile for $config_type${config_suffix:+ ($config_suffix)}: $total_combinations"
-    echo ""
-    
-    # Create config-specific identifier for output files
-    local config_id="${config_type}${config_suffix}"
-    
-    # Run profiling for each combination
-    for combo_name in "${!key_value_combos_ref[@]}"; do
-        IFS=' ' read -r key_type value_type <<< "${key_value_combos_ref[$combo_name]}"
-        
-        echo "Processing key-value combination: $key_type -> $value_type"
-        
-        for tree in "${trees_ref[@]}"; do
-            for cache_type in "${cache_types_ref[@]}"; do
-                echo "BiStorage Configuration:"
-                echo "  Primary: $primary_storage (R/W costs: $primary_read_cost/$primary_write_cost ns)"
-                echo "  Secondary: $secondary_storage (R/W costs: $secondary_read_cost/$secondary_write_cost ns)"
-                
-                for cache_size_percentage in "${cache_size_percentages_ref[@]}"; do
-                    for page_size in "${page_sizes_ref[@]}"; do
-                        for degree in "${degrees_ref[@]}"; do
-                            for records in "${records_ref[@]}"; do
-                                for memory_size in "${memory_sizes_ref[@]}"; do
-                                    # Calculate actual cache size from percentage and memory size
-                                    local actual_cache_size=$(calculate_cache_size "$cache_size_percentage" "$records" "$degree")
-                                    
-                                    echo "BiStorage cache size calculation: $cache_size_percentage of estimated pages for $records records (degree $degree) = $actual_cache_size entries"
-                                
-                                    for operation in "${operations_ref[@]}"; do
-                                        for thread_count in "${threads_ref[@]}"; do
-                                            ((current_combination++))
-                                            echo "Progress: $current_combination/$total_combinations ($config_id)"
-                                            
-                                            run_bistorage_cache_profiled_benchmark \
-                                                "$tree" "$cache_type" \
-                                                "$primary_storage" "$secondary_storage" \
-                                                "$actual_cache_size" "$page_size" "$memory_size" \
-                                                "$key_type" "$value_type" "$operation" \
-                                                "$degree" "$records" "$config_id" "$thread_count" \
-                                                "$cache_size_percentage" \
-                                                "$primary_read_cost" "$primary_write_cost" \
-                                                "$secondary_read_cost" "$secondary_write_cost"
-                                        done
-                                    done
-                                done
-                            done
-                        done
-                    done
-                done
-            done
-        done
-    done
-    
-    echo "=========================================="
-    echo "BiStorage cache profiling completed for $config_id!"
-    echo "Results saved in: $PROFILE_OUTPUT_DIR"
-    echo "Total profiles generated: $total_combinations"
-    echo "=========================================="
-}
-
-# Function to run single-threaded BiStorage cache profiling
-run_full_bistorage_cache_profiling_single_threaded() {
-    # Create a local single-threaded array
-    local SINGLE_THREADS=(1)
-    local CACHE_TYPES_LOCAL=("LRU")
-
-    echo "Running single-threaded BiStorage cache profiling with LRU..."
-    echo "Using threads: ${SINGLE_THREADS[*]}"
-    
-    local config_type="non_concurrent_default"    
-    run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "PMemStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-
-    local CACHE_TYPES_LOCAL=("A2Q")
-
-    echo "Running single-threaded BiStorage cache profiling with A2Q..."
-    echo "Using threads: ${SINGLE_THREADS[*]}"
-    
-    local config_type="non_concurrent_default"    
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "PMemStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-
-    local CACHE_TYPES_LOCAL=("CLOCK")
-
-    echo "Running single-threaded BiStorage cache profiling with CLOCK..."
-    echo "Using threads: ${SINGLE_THREADS[*]}"
-    
-    local config_type="non_concurrent_default"    
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "PMemStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-    #run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
-}
-
-# Function to run multi-threaded BiStorage cache profiling
-run_full_bistorage_cache_profiling_multi_threaded() {
-    echo "Running multi-threaded BiStorage cache profiling..."
-    echo "Using threads: ${THREADS[*]}"
-    
-    local CACHE_TYPES_LOCAL=("LRU")
-    echo "Running multi-threaded BiStorage cache profiling with LRU..."
-
-    local config_type="concurrent_default"    
-    run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" THREADS
-
-    local CACHE_TYPES_LOCAL=("A2Q")
-    echo "Running multi-threaded BiStorage cache profiling with A2Q..."
-
-    local config_type="concurrent_default"    
-    run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" THREADS
-
-    local CACHE_TYPES_LOCAL=("CLOCK")
-    echo "Running multi-threaded BiStorage cache profiling with CLOCK..."
-
-    local config_type="concurrent_default"    
-    run_full_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES OPERATIONS KEY_VALUE_COMBOS RECORDS "" THREADS
 }
 
 # Function to run ThreadSanitizer analysis on concurrent deadlock issue
@@ -1624,7 +1323,6 @@ show_usage() {
     echo "  large [basic|concurrent]    Run large cache configuration profiling"
     echo "  performance [basic|concurrent] Run performance-focused cache profiling"
     echo "  single <args>               Run single cache configuration profiling"
-    echo "  bistorage                   Run BiStorage (dual-tier) cache profiling"
     echo "  tsan|threadsanitizer        Run ThreadSanitizer analysis for concurrent deadlock debugging"
     echo "  analyze                     Analyze existing perf results"
     echo "  combine [results_dir]       Combine CSV files with perf data into single file"
@@ -1634,7 +1332,6 @@ show_usage() {
     echo "  $0 full basic               # Full profiling with basic cache configuration"
     echo "  $0 full concurrent          # Full profiling with concurrent cache configuration"
     echo "  $0 quick basic              # Quick benchmark with basic cache configuration"
-    echo "  $0 bistorage                # Run BiStorage dual-tier cache profiling"
     echo "  $0 tsan                     # Run ThreadSanitizer analysis to isolate deadlock issues"
     echo "  $0 single BplusTreeSOA LRU VolatileStorage 100 uint64_t uint64_t insert 64 100000 3 basic"
     echo "  $0 analyze                  # Analyze existing results"
@@ -1695,19 +1392,6 @@ case "${1:-full}" in
     "single")
         shift
         run_single_cache_profiling "$@"
-        ;;
-    "bistorage")
-        echo "=========================================="
-        echo "Running BiStorage Cache Profiling"
-        echo "=========================================="
-        run_full_bistorage_cache_profiling_single_threaded
-        #run_full_bistorage_cache_profiling_multi_threaded
-        analyze_cache_results
-        echo ""
-        echo "=========================================="
-        echo "Combining CSV files with perf data..."
-        echo "=========================================="
-        combine_csv_files "$PROFILE_OUTPUT_DIR"
         ;;
     "tsan"|"threadsanitizer")
         run_threadsanitizer_analysis
