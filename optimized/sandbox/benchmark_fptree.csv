@@ -1,4 +1,0 @@
-TreeType,KeyValueType,DatasetSize,InsertTimeUS,SearchTimeUS,RemoveTimeUS,TotalTimeUS,WALSizeBytes,CheckpointCount
-FPTree,uint64->uint64,10000,184527,1655,82178,268360,0,0
-FPTree,uint64->CHAR16,10000,183943,1376,79330,264649,0,0
-FPTree,uint32->uint32,10000,186270,1493,76767,264530,0,0

@@ -55,7 +55,7 @@ TREES=("BplusTreeSOA")
 DEGREES=(24)
 
 # YCSB Workloads to profile
-YCSB_WORKLOADS=("ycsb_a" "ycsb_b" "ycsb_c" "ycsb_d" "ycsb_e" "ycsb_f")
+YCSB_WORKLOADS=("ycsb_a" "ycsb_c" "ycsb_d")
 
 # Key-Value type combinations (only implemented combinations)
 declare -A KEY_VALUE_COMBOS
@@ -78,6 +78,7 @@ YCSB_DIR="$DATA_BASE_DIR/ycsb"
 # Perf events to collect (cache-focused)
 PERF_EVENTS="cache-misses,cache-references,cycles,instructions,branch-misses,page-faults,L1-dcache-load-misses,L1-dcache-loads,LLC-load-misses,LLC-loads,L1-icache-load-misses,L1-icache-loads"
 
+# Function to calculate actual cache size from percentage and memory size
 # Function to calculate actual cache size from percentage and memory size
 calculate_cache_size() {
     local percentage=$1
@@ -170,6 +171,7 @@ ensure_benchmark_data() {
 
 # Function to build with cache support
 build_cache_configuration() {
+    
     #return
 
     local config_type=$1  # "basic" or "concurrent"
@@ -190,6 +192,10 @@ build_cache_configuration() {
     if [ "$config_type" = "non_concurrent_default" ]; then
         echo "Building with cache + non_concurrent_default ..."
         cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ $RELEASE_OPTS"
+    elif [ "$config_type" = "non_concurrent_cwe" ]; then
+        echo "Building with cache + non_concurrent_relaxed ..."
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ $RELEASE_OPTS"
+        #cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ -D__COST_WEIGHTED_EVICTION__ $RELEASE_OPTS"
     elif [ "$config_type" = "non_concurrent_relaxed" ]; then
         echo "Building with cache + non_concurrent_relaxed ..."
         cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ -D__SELECTIVE_UPDATE__ $RELEASE_OPTS"
@@ -229,6 +235,9 @@ build_cache_configuration() {
         echo "Building with cache + concurrent_a2q_ghost_q_enabled_and_relaxed ..."
         cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ -D__CONCURRENT__ -D__MANAGE_GHOST_Q__ -D__SELECTIVE_UPDATE__ $RELEASE_OPTS"
     # CLOCK Specific __CLOCK_WITH_BUFFER__ is with concurrent
+    elif [ "$config_type" = "non_concurrent_clock_cwe" ]; then
+        echo "Building with cache + non_concurrent_clock_cwe ..."
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ -D__COST_WEIGHTED_EVICTION__ $RELEASE_OPTS"
     elif [ "$config_type" = "concurrent_clock_buffer_enabled" ]; then
         echo "Building with cache + concurrent_clock_buffer_enabled ..."
         cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-D__TREE_WITH_CACHE__ -D__CONCURRENT__ -D__CLOCK_WITH_BUFFER__ $RELEASE_OPTS"
@@ -327,6 +336,108 @@ run_ycsb_profiled_benchmark() {
     cd "$BENCHMARK_DIR" > /dev/null
     
     echo "Profiling completed for $profile_name"
+    echo ""
+}
+
+# Function to run single YCSB BiStorage cache benchmark with perf profiling
+run_ycsb_bistorage_profiled_benchmark() {
+    local tree_type=$1
+    local cache_type=$2
+    local primary_type=$3
+    local secondary_type=$4
+    local cache_size=$5
+    local page_size=$6
+    local memory_size=$7
+    local key_type=$8
+    local value_type=$9
+    local workload=${10}
+    local degree=${11}
+    local records=${12}
+    local config_name=${13}
+    local thread_count=${14}
+    local cache_size_percentage=${15}
+    local primary_read_cost=${16}
+    local primary_write_cost=${17}
+    local secondary_read_cost=${18}
+    local secondary_write_cost=${19}
+    
+    # Construct storage name from primary and secondary types
+    local storage_name="BiStorage_${primary_type}_${secondary_type}"
+    
+    local profile_name="${tree_type}_${cache_type}_${storage_name}_${cache_size}_${page_size}_${memory_size}_${key_type}_${value_type}_${workload}_${degree}_${records}_threads${thread_count}"
+    
+    # Create a separate folder for this individual run
+    local run_folder="$PROFILE_OUTPUT_DIR/${config_name}_${profile_name}"
+    mkdir -p "$run_folder"
+    
+    local perf_output="$run_folder/${config_name}_${profile_name}.prf"
+    local perf_data="$run_folder/${config_name}_${profile_name}.data"
+    
+    echo "=========================================="
+    echo "YCSB BiStorage Cache Profiling: $tree_type - $workload - Degree $degree"
+    echo "Cache: $cache_type (Size: $cache_size)"
+    echo "Primary Storage: $primary_type"
+    echo "Secondary Storage: $secondary_type"
+    echo "Page Size: $page_size, Memory Size: $memory_size"
+    echo "Key: $key_type, Value: $value_type, Records: $records"
+    echo "Threads: $thread_count"
+    echo "Costs - Primary R/W: $primary_read_cost/$primary_write_cost ns"
+    echo "Costs - Secondary R/W: $secondary_read_cost/$secondary_write_cost ns"
+    echo "Run Folder: $run_folder"
+    echo "Output: $perf_output"
+    echo "=========================================="
+    
+    # Ensure benchmark data exists and is accessible
+    ensure_benchmark_data
+    
+    # Set up data path for benchmark execution
+    cd "$DATA_BASE_DIR"
+    
+    # Run benchmark with perf stat (statistical profiling)
+    # Note: Storage paths are defined in common.h and used internally by the benchmark
+    perf stat -e "$PERF_EVENTS" \
+              -o "$perf_output" \
+              numactl --cpunodebind=0 --membind=0 \
+              "$BENCHMARK_EXEC" \
+              --config "bm_cache_bistorage_ycsb" \
+              --cache-type "$cache_type" \
+              --primary-storage-type "$primary_type" \
+              --secondary-storage-type "$secondary_type" \
+              --primary-read-cost "$primary_read_cost" \
+              --primary-write-cost "$primary_write_cost" \
+              --secondary-read-cost "$secondary_read_cost" \
+              --secondary-write-cost "$secondary_write_cost" \
+              --cache-size "$cache_size" \
+              --page-size "$page_size" \
+              --memory-size "$memory_size" \
+              --tree-type "$tree_type" \
+              --key-type "$key_type" \
+              --value-type "$value_type" \
+              --workload-type "$workload" \
+              --degree "$degree" \
+              --records "$records" \
+              --runs "$RUNS" \
+              --threads "$thread_count" \
+              --output-dir "$run_folder" \
+              --config-name "$config_name" \
+              --cache-size-percentage "$cache_size_percentage" \
+              --cache-page-limit "$cache_size"
+    
+    # Rename the CSV file to match the perf file naming convention
+    local latest_csv=$(ls -t "$run_folder"/benchmark_bistorage_*.csv 2>/dev/null | head -1)
+    if [ -f "$latest_csv" ]; then
+        local target_csv="$run_folder/${config_name}_${profile_name}.csv"
+        mv "$latest_csv" "$target_csv"
+        echo "CSV file renamed to: $(basename "$target_csv")"
+    fi
+    
+    echo "YCSB BiStorage cache profiling completed for $profile_name"
+    
+    # Return to benchmark directory
+    cd "$BENCHMARK_DIR" > /dev/null
+    
+    # Brief sleep to let system settle between benchmarks
+    sleep 2
     echo ""
 }
 
@@ -456,6 +567,8 @@ run_full_ycsb_cache_profiling_single_threaded() {
     
     local config_type="non_concurrent_default"    
     run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+
+    #return
 
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -624,7 +737,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_default"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -632,7 +745,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_default"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     # Create a local single-threaded array
     local SINGLE_THREADS=(1)
@@ -642,7 +755,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
     
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -650,7 +763,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -658,7 +771,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
     
     local config_type="non_concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
     
     local CACHE_TYPES_LOCAL=("LRU")
 
@@ -666,7 +779,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local config_type="non_concurrent_lru_metadata_update_in_order_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -674,7 +787,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     local config_type="non_concurrent_a2q_ghost_q_enabled_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
 
     echo "Running multi-threaded YCSB cache profiling..."
     echo "Using threads: ${THREADS[*]}"
@@ -722,7 +835,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Running multi-threaded YCSB cache profiling (extended)..."
     
     local config_type="concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
     echo "Using cache types: ${CACHE_TYPES_LOCAL[*]}"
@@ -730,7 +843,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     echo "Running multi-threaded YCSB cache profiling (extended)..."
     
     local config_type="concurrent_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("LRU")
 
@@ -738,7 +851,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local config_type="concurrent_lru_metadata_update_in_order_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("A2Q")
 
@@ -746,7 +859,7 @@ run_full_ycsb_cache_profiling_thread_scaling() {
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local config_type="concurrent_a2q_ghost_q_enabled_and_relaxed"    
-    run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+    #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 
     local CACHE_TYPES_LOCAL=("CLOCK")
 
@@ -755,6 +868,208 @@ run_full_ycsb_cache_profiling_thread_scaling() {
 
     local config_type="concurrent_clock_buffer_enabled_and_relaxed"    
     #run_full_ycsb_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL STORAGE_TYPES CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+}
+
+# Function to run comprehensive YCSB BiStorage cache profiling with custom parameters
+run_full_ycsb_bistorage_cache_profiling_with_params() {
+    local config_type=${1:-"basic"}  # "basic" or "concurrent"
+    local -n cache_types_ref=$2
+    local primary_storage=$3
+    local primary_read_cost=$4
+    local primary_write_cost=$5
+    local secondary_storage=$6
+    local secondary_read_cost=$7
+    local secondary_write_cost=$8
+    local -n cache_size_percentages_ref=$9
+    local -n page_sizes_ref=${10}
+    local -n memory_sizes_ref=${11}
+    local -n trees_ref=${12}
+    local -n degrees_ref=${13}
+    local -n ycsb_workloads_ref=${14}
+    local -n key_value_combos_ref=${15}
+    local -n records_ref=${16}
+    local config_suffix=${17:-""}
+    local -n threads_ref=${18:-THREADS}
+    
+    echo "Starting comprehensive YCSB BiStorage cache profiling for $config_type configuration${config_suffix:+ ($config_suffix)}..."
+    echo "Cache Types: ${cache_types_ref[*]}"
+    echo "Primary Storage: $primary_storage (R/W costs: $primary_read_cost/$primary_write_cost ns)"
+    echo "Secondary Storage: $secondary_storage (R/W costs: $secondary_read_cost/$secondary_write_cost ns)"
+    echo "Cache Size Percentages: ${cache_size_percentages_ref[*]}"
+    echo "Page Sizes: ${page_sizes_ref[*]}"
+    echo "Memory Sizes: ${memory_sizes_ref[*]}"
+    echo "Trees: ${trees_ref[*]}"
+    echo "Degrees: ${degrees_ref[*]}"
+    echo "YCSB Workloads: ${ycsb_workloads_ref[*]}"
+    echo "Records: ${records_ref[*]}"
+    echo "Threads: ${threads_ref[*]}"
+    echo ""
+    
+    # Build the appropriate configuration
+    build_cache_configuration "$config_type"
+
+    local total_combinations=0
+    local current_combination=0
+    
+    # Calculate total combinations
+    for combo_name in "${!key_value_combos_ref[@]}"; do
+        IFS=' ' read -r key_type value_type <<< "${key_value_combos_ref[$combo_name]}"
+        for tree in "${trees_ref[@]}"; do
+            for cache_type in "${cache_types_ref[@]}"; do
+                for cache_size_percentage in "${cache_size_percentages_ref[@]}"; do
+                    for page_size in "${page_sizes_ref[@]}"; do
+                        for memory_size in "${memory_sizes_ref[@]}"; do
+                            for degree in "${degrees_ref[@]}"; do
+                                for workload in "${ycsb_workloads_ref[@]}"; do
+                                    for records in "${records_ref[@]}"; do
+                                        for thread_count in "${threads_ref[@]}"; do
+                                            ((total_combinations++))
+                                        done
+                                    done
+                                done
+                            done
+                        done
+                    done
+                done
+            done
+        done
+    done
+    
+    echo "Total YCSB BiStorage combinations to profile for $config_type${config_suffix:+ ($config_suffix)}: $total_combinations"
+    echo ""
+    
+    # Create config-specific identifier for output files
+    local config_id="${config_type}${config_suffix}"
+    
+    # Run profiling for each combination
+    for combo_name in "${!key_value_combos_ref[@]}"; do
+        IFS=' ' read -r key_type value_type <<< "${key_value_combos_ref[$combo_name]}"
+        
+        echo "Processing key-value combination: $key_type -> $value_type"
+        
+        for tree in "${trees_ref[@]}"; do
+            for cache_type in "${cache_types_ref[@]}"; do
+                echo "YCSB BiStorage Configuration:"
+                echo "  Primary: $primary_storage (R/W costs: $primary_read_cost/$primary_write_cost ns)"
+                echo "  Secondary: $secondary_storage (R/W costs: $secondary_read_cost/$secondary_write_cost ns)"
+                
+                for cache_size_percentage in "${cache_size_percentages_ref[@]}"; do
+                    for page_size in "${page_sizes_ref[@]}"; do
+                        for degree in "${degrees_ref[@]}"; do
+                            for records in "${records_ref[@]}"; do
+                                for memory_size in "${memory_sizes_ref[@]}"; do
+                                    # Calculate actual cache size from percentage and memory size
+                                    local actual_cache_size=$(calculate_cache_size "$cache_size_percentage" "$records" "$degree")
+                                    
+                                    echo "YCSB BiStorage cache size calculation: $cache_size_percentage of estimated pages for $records records (degree $degree) = $actual_cache_size entries"
+                                
+                                    for workload in "${ycsb_workloads_ref[@]}"; do
+                                        for thread_count in "${threads_ref[@]}"; do
+                                            ((current_combination++))
+                                            echo "Progress: $current_combination/$total_combinations ($config_id)"
+                                            
+                                            run_ycsb_bistorage_profiled_benchmark \
+                                                "$tree" "$cache_type" \
+                                                "$primary_storage" "$secondary_storage" \
+                                                "$actual_cache_size" "$page_size" "$memory_size" \
+                                                "$key_type" "$value_type" "$workload" \
+                                                "$degree" "$records" "$config_id" "$thread_count" \
+                                                "$cache_size_percentage" \
+                                                "$primary_read_cost" "$primary_write_cost" \
+                                                "$secondary_read_cost" "$secondary_write_cost"
+                                        done
+                                    done
+                                done
+                            done
+                        done
+                    done
+                done
+            done
+        done
+    done
+    
+    echo "=========================================="
+    echo "YCSB BiStorage cache profiling completed for $config_id!"
+    echo "Results saved in: $PROFILE_OUTPUT_DIR"
+    echo "Total profiles generated: $total_combinations"
+    echo "=========================================="
+}
+
+# Function to run single-threaded YCSB BiStorage cache profiling
+run_full_ycsb_bistorage_cache_profiling_single_threaded() {
+    # Create a local single-threaded array
+    local SINGLE_THREADS=(1)
+    local CACHE_TYPES_LOCAL=("LRU")
+    local config_type="non_concurrent_lru_metadata_update_in_order"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_lru_metadata_update_in_order_and_relaxed"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local CACHE_TYPES_LOCAL=("A2Q")
+    local config_type="non_concurrent_a2q_ghost_q_enabled"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_a2q_ghost_q_enabled_and_relaxed"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_default"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_relaxed"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local CACHE_TYPES_LOCAL=("CLOCK")
+    local config_type="non_concurrent_default"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_relaxed"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    local config_type="non_concurrent_cwe"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0   CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "FileStorage" 5 5 "VolatileStorage" 0 0 CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+
+    local CACHE_TYPES_LOCAL=("A2Q")
+
+    echo "Running single-threaded YCSB BiStorage cache profiling with A2Q..."
+    echo "Using threads: ${SINGLE_THREADS[*]}"
+    
+    local config_type="non_concurrent_default"    
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "PMemStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+
+    local CACHE_TYPES_LOCAL=("CLOCK")
+
+    echo "Running single-threaded YCSB BiStorage cache profiling with CLOCK..."
+    echo "Using threads: ${SINGLE_THREADS[*]}"
+    
+    local config_type="non_concurrent_default"    
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "PMemStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "VolatileStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+    #run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "PMemStorage" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "FileStorage" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" SINGLE_THREADS
+}
+
+# Function to run multi-threaded YCSB BiStorage cache profiling
+run_full_ycsb_bistorage_cache_profiling_multi_threaded() {
+    echo "Running multi-threaded YCSB BiStorage cache profiling..."
+    echo "Using threads: ${THREADS[*]}"
+    
+    local CACHE_TYPES_LOCAL=("LRU")
+    echo "Running multi-threaded YCSB BiStorage cache profiling with LRU..."
+
+    local config_type="concurrent_default"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+
+    local CACHE_TYPES_LOCAL=("A2Q")
+    echo "Running multi-threaded YCSB BiStorage cache profiling with A2Q..."
+
+    local config_type="concurrent_default"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
+
+    local CACHE_TYPES_LOCAL=("CLOCK")
+    echo "Running multi-threaded YCSB BiStorage cache profiling with CLOCK..."
+
+    local config_type="concurrent_default"    
+    run_full_ycsb_bistorage_cache_profiling_with_params "$config_type" CACHE_TYPES_LOCAL "$BISTORAGE_PRIMARY_STORAGE" "$BISTORAGE_PRIMARY_READ_COST" "$BISTORAGE_PRIMARY_WRITE_COST" "$BISTORAGE_SECONDARY_STORAGE" "$BISTORAGE_SECONDARY_READ_COST" "$BISTORAGE_SECONDARY_WRITE_COST" CACHE_SIZE_PERCENTAGES PAGE_SIZES MEMORY_SIZES TREES DEGREES YCSB_WORKLOADS KEY_VALUE_COMBOS RECORDS "" THREADS
 }
 
 # Function to combine CSV files from all benchmark runs
@@ -891,8 +1206,7 @@ combine_csv_files() {
 # Main script logic
 case "${1:-full}" in
     "full")
-        run_full_ycsb_cache_profiling_single_threaded
-        #run_full_ycsb_cache_profiling_multi_threaded
+        run_full_ycsb_bistorage_cache_profiling_single_threaded
         echo ""
         echo "=========================================="
         echo "Combining CSV files with perf data..."
@@ -915,6 +1229,32 @@ case "${1:-full}" in
         echo "=========================================="
         combine_csv_files "$PROFILE_OUTPUT_DIR"
         ;;
+    "bistorage_single")
+        run_full_ycsb_bistorage_cache_profiling_single_threaded
+        echo ""
+        echo "=========================================="
+        echo "Combining CSV files with perf data..."
+        echo "=========================================="
+        combine_csv_files "$PROFILE_OUTPUT_DIR"
+        ;;
+    "bistorage_multi")
+        run_full_ycsb_bistorage_cache_profiling_multi_threaded
+        echo ""
+        echo "=========================================="
+        echo "Combining CSV files with perf data..."
+        echo "=========================================="
+        combine_csv_files "$PROFILE_OUTPUT_DIR"
+        ;;
+    "bistorage")
+        #run_full_ycsb_cache_profiling_single_threaded
+        run_full_ycsb_bistorage_cache_profiling_single_threaded
+        #run_full_ycsb_bistorage_cache_profiling_multi_threaded
+        echo ""
+        echo "=========================================="
+        echo "Combining CSV files with perf data..."
+        echo "=========================================="
+        combine_csv_files "$PROFILE_OUTPUT_DIR"
+        ;;
     "combine")
         combine_csv_files "$2"
         ;;
@@ -922,16 +1262,23 @@ case "${1:-full}" in
         echo "Usage: $0 [command]"
         echo ""
         echo "Commands:"
-        echo "  full      - Run both single-threaded and multi-threaded YCSB benchmarks (default)"
-        echo "  single    - Run only single-threaded YCSB benchmarks"
-        echo "  multi     - Run only multi-threaded YCSB benchmarks"
-        echo "  combine   - Combine CSV files from existing results directory"
-        echo "  help      - Show this help message"
+        echo "  full              - Run both single-threaded and multi-threaded YCSB benchmarks (default)"
+        echo "  single            - Run only single-threaded YCSB benchmarks"
+        echo "  multi             - Run only multi-threaded YCSB benchmarks"
+        echo "  thread_scaling    - Run thread scaling benchmarks"
+        echo "  bistorage         - Run both single-threaded and multi-threaded YCSB BiStorage benchmarks"
+        echo "  bistorage_single  - Run only single-threaded YCSB BiStorage benchmarks"
+        echo "  bistorage_multi   - Run only multi-threaded YCSB BiStorage benchmarks"
+        echo "  combine           - Combine CSV files from existing results directory"
+        echo "  help              - Show this help message"
         echo ""
         echo "Examples:"
-        echo "  $0                    # Run full benchmark suite"
-        echo "  $0 single             # Run single-threaded only"
-        echo "  $0 multi              # Run multi-threaded only"
+        echo "  $0                           # Run full benchmark suite"
+        echo "  $0 single                    # Run single-threaded only"
+        echo "  $0 multi                     # Run multi-threaded only"
+        echo "  $0 bistorage                 # Run BiStorage benchmarks (single and multi-threaded)"
+        echo "  $0 bistorage_single          # Run single-threaded BiStorage only"
+        echo "  $0 bistorage_multi           # Run multi-threaded BiStorage only"
         echo "  $0 combine /path/to/results  # Combine existing results"
         ;;
     *)

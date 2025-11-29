@@ -1,5 +1,0 @@
-TreeType,KeyValueType,DatasetSize,InsertTimeUS,SearchTimeUS,RemoveTimeUS,TotalTimeUS,WALSizeBytes,CheckpointCount
-Pure InMemory,CHAR16->CHAR16,10000,4178,2001,2062,8241,0,0
-Pure InMemory,uint32->uint32,10000,1743,1035,1358,4136,0,0
-Pure InMemory,uint64->CHAR16,10000,2296,1019,1532,4847,0,0
-Pure InMemory,uint64->uint64,10000,4392,2814,2976,10182,0,0

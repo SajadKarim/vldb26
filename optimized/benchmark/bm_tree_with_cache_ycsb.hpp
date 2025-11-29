@@ -12,6 +12,7 @@
 #include <sstream>
 #include <thread>
 #include <memory>
+#include <barrier>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -238,7 +239,8 @@ void ycsb_worker(
     const std::vector<ycsbworkloadgenerator::YCSBOperation<KeyType>>& operations,
     size_t start_idx,
     size_t end_idx,
-    int thread_id
+    int thread_id,
+    std::barrier<>& sync_barrier
 #ifdef __RECORD_LATENCY__
     ,BufferedLatencyLogger* thread_logger
 #endif
@@ -246,6 +248,9 @@ void ycsb_worker(
     ,StatsCollectorCallback<StoreType> stats_callback
 #endif
 ) {
+    // Wait for all threads to be ready before starting workload
+    sync_barrier.arrive_and_wait();
+    
     // Execute operations from the pre-generated array
     ValueType value;
     for (size_t i = start_idx; i < end_idx; i++) {
@@ -339,7 +344,7 @@ void perform_ycsb_operations(
     // Single-threaded implementation
     std::cout << "Performing YCSB operations (single-threaded)..." << std::endl;
     auto begin = std::chrono::steady_clock::now();
-    
+    //for (size_t j = 0; j < 10; j++) {
     ValueType value;
     for (size_t i = 0; i < operation_count; i++) {
 #ifdef __RECORD_LATENCY__
@@ -391,70 +396,13 @@ void perform_ycsb_operations(
         }
 #endif
     }
-    
+    //}
     auto end = std::chrono::steady_clock::now();
     duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
     
 #else // __CONCURRENT__
     if (threads == 1) {
-        // Use single-threaded path even in concurrent build
-        std::cout << "Performing YCSB operations (single-threaded)..." << std::endl;
-        auto begin = std::chrono::steady_clock::now();
-        
-        ValueType value;
-        for (size_t i = 0; i < operation_count; i++) {
-#ifdef __RECORD_LATENCY__
-            auto start = std::chrono::steady_clock::now();
-#endif
-            
-            const auto& op = operations[i];
-            switch (op.operation) {
-                case ycsbworkloadgenerator::OperationType::READ:
-                    ptrTree.search(op.key, value);
-                    break;
-                case ycsbworkloadgenerator::OperationType::UPDATE:
-                    if constexpr (std::is_same_v<ValueType, KeyType>) {
-                        ptrTree.insert(op.key, op.key);
-                    } else {
-                        ValueType update_value = static_cast<ValueType>(op.key);
-                        ptrTree.insert(op.key, update_value);
-                    }
-                    break;
-                case ycsbworkloadgenerator::OperationType::INSERT:
-                    if constexpr (std::is_same_v<ValueType, KeyType>) {
-                        ptrTree.insert(op.key, op.key);
-                    } else {
-                        ValueType insert_value = static_cast<ValueType>(op.key);
-                        ptrTree.insert(op.key, insert_value);
-                    }
-                    break;
-                case ycsbworkloadgenerator::OperationType::DELETE:
-                    ptrTree.remove(op.key);
-                    break;
-                case ycsbworkloadgenerator::OperationType::SCAN:
-                    ptrTree.search(op.key, value);
-                    break;
-                case ycsbworkloadgenerator::OperationType::READ_MODIFY_WRITE:
-                    ptrTree.search(op.key, value);
-                    if constexpr (std::is_same_v<ValueType, KeyType>) {
-                        ptrTree.insert(op.key, op.key);
-                    } else {
-                        ValueType rmw_value = static_cast<ValueType>(op.key);
-                        ptrTree.insert(op.key, rmw_value);
-                    }
-                    break;
-            }
-            
-#ifdef __RECORD_LATENCY__
-            auto end = std::chrono::steady_clock::now();
-            if (ycsb_logger) {
-                ycsb_logger->log_latency(i, std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
-            }
-#endif
-        }
-        
-        auto end = std::chrono::steady_clock::now();
-        duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+        // never occur .. as already addressed above
     } else {
         // Multi-threaded implementation - split pre-generated operations array
         std::cout << "Performing YCSB operations with " << threads << " threads..." << std::endl;
@@ -488,13 +436,16 @@ void perform_ycsb_operations(
         }
 #endif
         
+        // Create barrier for synchronizing thread start (threads + 1 for main thread)
+        std::barrier sync_barrier(threads + 1);
+        
         std::vector<std::thread> vtThreads;
-        auto begin = std::chrono::steady_clock::now();
         
         // Calculate operations per thread
         size_t ops_per_thread = operation_count / threads;
         
         // Launch worker threads - each processes a chunk of the operations array
+        // Threads will block on the barrier before starting work
         for (int thread_id = 0; thread_id < threads; thread_id++) {
             size_t start_idx = thread_id * ops_per_thread;
             size_t end_idx = (thread_id == threads - 1) ? 
@@ -506,7 +457,8 @@ void perform_ycsb_operations(
                 std::cref(operations),
                 start_idx,
                 end_idx,
-                thread_id
+                thread_id,
+                std::ref(sync_barrier)
 #ifdef __RECORD_LATENCY__
                 ,thread_loggers[thread_id].get()
 #endif
@@ -516,11 +468,19 @@ void perform_ycsb_operations(
             );
         }
         
+        // All threads are created and waiting at the barrier
+        // Main thread arrives at barrier to release all threads simultaneously
+        sync_barrier.arrive_and_wait();
+        
+        // Start timing immediately after releasing threads
+        auto begin = std::chrono::steady_clock::now();
+        
         // Wait for all threads to complete
         for (auto& thread : vtThreads) {
             thread.join();
         }
         
+        // Stop timing after all threads complete
         auto end = std::chrono::steady_clock::now();
         duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
 
@@ -628,7 +588,7 @@ void run_ycsb_cache_benchmark(
         std::vector<KeyType> initial_data;
         try {
             std::string key_workload_type = get_workload_type_string(key_type_str);
-            std::string init_filename = "data/" + key_workload_type + "_random_" + std::to_string(records) + ".dat";
+            std::string init_filename = "data/" + key_workload_type + "_sequential_" + std::to_string(records) + ".dat";
             
             if constexpr (std::is_same_v<KeyType, uint64_t>) {
                 initial_data = workloadgenerator::load_data_from_file<uint64_t>(init_filename);
@@ -672,7 +632,7 @@ void run_ycsb_cache_benchmark(
         }
         
         std::cout << "Initial population complete. Starting YCSB workload execution..." << std::endl;
-
+//ptrTree.flush();
         // Execute YCSB workload operations
         perform_ycsb_operations<StoreType, KeyType, ValueType>(
             ptrTree, operations, operations.size(), threads, duration,
@@ -759,7 +719,7 @@ void run_ycsb_cache_benchmark(
             operations.size(),      // record_count
             degree,                 // degree
             workload_type,          // operation
-            duration.count(),       // time_us (nanoseconds)
+            duration.count()/1000,       // time_us (nanoseconds)
             throughput,             // throughput_ops_sec
             run_id,                 // test_run_id
             total_hits,             // cache_hits
@@ -796,7 +756,7 @@ void run_ycsb_cache_benchmark(
             operations.size(),      // record_count
             degree,                 // degree
             workload_type,          // operation
-            duration.count(),       // time_us (nanoseconds)
+            duration.count()/1000,       // time_us (nanoseconds)
             throughput,             // throughput_ops_sec
             run_id,                 // test_run_id
             0,                      // cache_hits

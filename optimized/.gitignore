@@ -1,0 +1,33 @@
+# Build directories
+build*/
+Build/
+cmake-build-debug/
+cmake-build-release/
+out/
+dist/
+
+# Dataset files
+*.dat
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# OS-specific
+.DS_Store
+Thumbs.db

@@ -843,22 +843,22 @@ public:
     {
         m_ptrCache->flush();
 
-        //if (m_ptrRootNode == nullptr)
-        //{
-        //    m_ptrCache->getObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
-        //}
-        //else if (m_ptrRootNode->m_ptrCoreObject == nullptr)
-        //{
-        //    if (m_ptrRootNode->m_uidUpdated != std::nullopt)
-        //    {
-        //        m_uidRootNode = *m_ptrRootNode->m_uidUpdated;
-        //        m_ptrCache->getCoreObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
-        //    }
-        //    else
-        //    {
-        //        m_ptrCache->getObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
-        //    }
-        //}
+        if (m_ptrRootNode == nullptr)
+        {
+           m_ptrCache->getObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
+        }
+        else if (m_ptrRootNode->m_ptrCoreObject == nullptr)
+        {
+           if (m_ptrRootNode->m_uidUpdated != std::nullopt)
+           {
+               m_uidRootNode = *m_ptrRootNode->m_uidUpdated;
+               m_ptrCache->getCoreObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
+           }
+           else
+           {
+               m_ptrCache->getObject(m_nDegree, m_uidRootNode, m_ptrRootNode);
+           }
+        }
 
         return ErrorCode::Success;
     }

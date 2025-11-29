@@ -7,15 +7,25 @@
 #include "bm_tree_with_no_cache.hpp"
 #include "bm_tree_with_cache_real.hpp"
 #include "bm_tree_with_cache_ycsb.hpp"
+#include "bm_tree_with_cache_bistorage.hpp"
+#include "bm_tree_with_cache_bistorage_ycsb.hpp"
+#include "bm_tree_with_cache_ycsb_device_aware.hpp"
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [OPTIONS]\n";
     std::cout << "       " << program_name << " single <tree_type> <key_type> <value_type> <operation> <degree> [records] [runs]\n\n";
     std::cout << "Options:\n";
-    std::cout << "  --config <config>      Configuration: bm_nocache (default), bm_cache, bm_cache_ycsb\n";
+    std::cout << "  --config <config>      Configuration: bm_nocache (default), bm_cache, bm_cache_ycsb, bm_cache_bistorage, bm_cache_bistorage_ycsb, bm_cache_ycsb_device_aware\n";
     std::cout << "  --cache-type <type>    Cache type: LRU (default), CLOCK, A2Q (only for bm_cache)\n";
     std::cout << "  --cache-size <size>    Cache size (default: 100)\n";
     std::cout << "  --storage-type <type>  Storage type: VolatileStorage (default), FileStorage, PMemStorage (only for bm_cache)\n";
+    std::cout << "  --primary-storage-type <type>   Primary storage for BiStorage: VolatileStorage (default)\n";
+    std::cout << "  --secondary-storage-type <type> Secondary storage for BiStorage: PMemStorage (default), FileStorage\n";
+    std::cout << "  --primary-read-cost <ns>        Primary storage read cost in nanoseconds (default: 10)\n";
+    std::cout << "  --primary-write-cost <ns>       Primary storage write cost in nanoseconds (default: 10)\n";
+    std::cout << "  --secondary-read-cost <ns>      Secondary storage read cost in nanoseconds (default: 300)\n";
+    std::cout << "  --secondary-write-cost <ns>     Secondary storage write cost in nanoseconds (default: 300)\n";
+    std::cout << "                         Note: Storage paths are defined in common.h\n";
     std::cout << "  --page-size <size>     Page size (default: 2048)\n";
     std::cout << "  --memory-size <size>   Memory size in bytes (default: 1073741824 = 1GB)\n";
     std::cout << "  --tree-type <type>     Tree type: BplusTreeSOA, BplusTreeAOS, BepsilonTreeSOA,\n";
@@ -130,6 +140,20 @@ int main(int argc, char* argv[])
     // Get cache page limit parameter (default to 0)
     size_t cache_page_limit = args.count("cache-page-limit") ? std::stoull(args["cache-page-limit"]) : 0;
     
+    // BiStorage-specific parameters
+    std::string primary_storage_type = args.count("primary-storage-type") ? 
+        args["primary-storage-type"] : "VolatileStorage";
+    std::string secondary_storage_type = args.count("secondary-storage-type") ? 
+        args["secondary-storage-type"] : "PMemStorage";
+    uint64_t primary_read_cost = args.count("primary-read-cost") ? 
+        std::stoull(args["primary-read-cost"]) : BISTORAGE_PRIMARY_READ_COST;
+    uint64_t primary_write_cost = args.count("primary-write-cost") ? 
+        std::stoull(args["primary-write-cost"]) : BISTORAGE_PRIMARY_WRITE_COST;
+    uint64_t secondary_read_cost = args.count("secondary-read-cost") ? 
+        std::stoull(args["secondary-read-cost"]) : BISTORAGE_SECONDARY_READ_COST_PMEM;
+    uint64_t secondary_write_cost = args.count("secondary-write-cost") ? 
+        std::stoull(args["secondary-write-cost"]) : BISTORAGE_SECONDARY_WRITE_COST_PMEM;
+    
     // Debug output
 
     
@@ -208,9 +232,111 @@ int main(int argc, char* argv[])
                 cache_type, runs, output_dir, storage_type, cache_size, page_size, memory_size,
                 workload_types, degrees, record_counts, threads, config_name, cache_size_percentage, cache_page_limit);
 #endif
+        } else if (config == "bm_cache_bistorage") {
+#ifdef __TREE_WITH_CACHE__
+            std::cout << "Testing B+ Tree with " << cache_type << " Cache and BiStorage..." << std::endl;
+            std::cout << "Primary Storage: " << primary_storage_type << std::endl;
+            std::cout << "Secondary Storage: " << secondary_storage_type << std::endl;
+            std::cout << "Number of runs per configuration: " << runs << std::endl;
+            std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
+            
+            // For BiStorage, we need tree-type and operation to be specified
+            if (!args.count("tree-type") || !args.count("operation")) {
+                std::cerr << "Error: BiStorage configuration requires --tree-type and --operation parameters" << std::endl;
+                return 1;
+            }
+            
+            if (!args.count("degree") || !args.count("records")) {
+                std::cerr << "Error: BiStorage configuration requires --degree and --records parameters" << std::endl;
+                return 1;
+            }
+            
+            std::string tree_type = args["tree-type"];
+            std::string operation = args["operation"];
+            size_t degree = std::stoull(args["degree"]);
+            size_t records = std::stoull(args["records"]);
+            
+            bm_tree_with_cache_bistorage::test_bistorage_with_shell_parameters(
+                cache_type, primary_storage_type, secondary_storage_type,
+                primary_read_cost, primary_write_cost,
+                secondary_read_cost, secondary_write_cost,
+                cache_size, page_size, memory_size,
+                tree_type, operation, degree, records,
+                runs, output_dir, threads, config_name,
+                cache_size_percentage, cache_page_limit);
+#else
+            std::cerr << "Error: BiStorage configuration requires cache support (compile with __TREE_WITH_CACHE__)" << std::endl;
+            return 1;
+#endif
+        } else if (config == "bm_cache_bistorage_ycsb") {
+#ifdef __TREE_WITH_CACHE__
+            std::cout << "Testing B+ Tree with " << cache_type << " Cache and BiStorage (YCSB)..." << std::endl;
+            std::cout << "Primary Storage: " << primary_storage_type << std::endl;
+            std::cout << "Secondary Storage: " << secondary_storage_type << std::endl;
+            std::cout << "Number of runs per configuration: " << runs << std::endl;
+            std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
+            
+            // For BiStorage YCSB, we need tree-type and workload-type to be specified
+            if (!args.count("tree-type") || !args.count("workload-type")) {
+                std::cerr << "Error: BiStorage YCSB configuration requires --tree-type and --workload-type parameters" << std::endl;
+                return 1;
+            }
+            
+            if (!args.count("degree") || !args.count("records")) {
+                std::cerr << "Error: BiStorage YCSB configuration requires --degree and --records parameters" << std::endl;
+                return 1;
+            }
+            
+            std::string tree_type = args["tree-type"];
+            std::string workload_type = args["workload-type"];
+            size_t degree = std::stoull(args["degree"]);
+            size_t records = std::stoull(args["records"]);
+            
+            bm_tree_with_cache_bistorage_ycsb::test_bistorage_ycsb_with_shell_parameters(
+                cache_type, primary_storage_type, secondary_storage_type,
+                primary_read_cost, primary_write_cost,
+                secondary_read_cost, secondary_write_cost,
+                cache_size, page_size, memory_size,
+                tree_type, workload_type, degree, records,
+                runs, output_dir, threads, config_name,
+                cache_size_percentage, cache_page_limit);
+#else
+            std::cerr << "Error: BiStorage YCSB configuration requires cache support (compile with __TREE_WITH_CACHE__)" << std::endl;
+            return 1;
+#endif
+        } else if (config == "bm_cache_ycsb_device_aware") {
+#ifdef __TREE_WITH_CACHE__
+            std::cout << "Testing B+ Tree with Device-Aware Policy (YCSB)..." << std::endl;
+            std::cout << "Number of runs per configuration: " << runs << std::endl;
+            std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
+            
+            // Prepare YCSB workloads, degrees, and record counts based on provided parameters
+            std::vector<std::string> workload_types = {"ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"};
+            std::vector<std::string> storage_types = {storage_type};
+            std::vector<size_t> degrees = {64, 128, 256};
+            std::vector<size_t> record_counts = {100000, 500000, 1000000};
+            
+            // Override with specific parameters if provided
+            if (args.count("workload-type")) {
+                workload_types = {args["workload-type"]};
+            }
+            if (args.count("degree")) {
+                degrees = {static_cast<size_t>(std::stoi(args["degree"]))};
+            }
+            if (args.count("records")) {
+                record_counts = {static_cast<size_t>(std::stoi(args["records"]))};
+            }
+            
+            bm_tree_with_cache_ycsb_device_aware::test_ycsb_with_device_aware_policy(
+                workload_types, storage_types, degrees, record_counts,
+                runs, output_dir, threads);
+#else
+            std::cerr << "Error: bm_cache_ycsb_device_aware configuration not available in this build" << std::endl;
+            return 1;
+#endif
         } else {
             std::cerr << "Error: Unknown configuration: " << config << std::endl;
-            std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb" << std::endl;
+            std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb, bm_cache_bistorage, bm_cache_bistorage_ycsb, bm_cache_ycsb_device_aware" << std::endl;
             return 1;
         }
         return 0;
@@ -252,7 +378,7 @@ int main(int argc, char* argv[])
     std::string output_dir = args.count("output-dir") ? args["output-dir"] : "";
     
     // Validate required parameters for single benchmark mode
-    if (config == "bm_cache_ycsb") {
+    if (config == "bm_cache_ycsb" || config == "bm_cache_bistorage_ycsb") {
         if (tree_type.empty() || workload_type.empty()) {
             std::cerr << "Error: --tree-type and --workload-type are required for YCSB benchmark mode\n";
             print_usage(argv[0]);
@@ -281,11 +407,21 @@ int main(int argc, char* argv[])
         std::cout << "  Storage Type: " << storage_type << "\n";
         std::cout << "  Page Size: " << page_size << "\n";
         std::cout << "  Memory Size: " << memory_size << "\n";
+    } else if (config == "bm_cache_bistorage" || config == "bm_cache_bistorage_ycsb") {
+        std::cout << "  Cache Type: " << cache_type << "\n";
+        std::cout << "  Cache Size: " << cache_size << "\n";
+        std::cout << "  Primary Storage Type: " << primary_storage_type << "\n";
+        std::cout << "  Secondary Storage Type: " << secondary_storage_type << "\n";
+        std::cout << "  Primary Read/Write Cost: " << primary_read_cost << "/" << primary_write_cost << " ns\n";
+        std::cout << "  Secondary Read/Write Cost: " << secondary_read_cost << "/" << secondary_write_cost << " ns\n";
+        std::cout << "  Storage Paths: Defined in common.h\n";
+        std::cout << "  Page Size: " << page_size << "\n";
+        std::cout << "  Memory Size: " << memory_size << "\n";
     }
     std::cout << "  Tree Type: " << tree_type << "\n";
     std::cout << "  Key Type: " << key_type << "\n";
     std::cout << "  Value Type: " << value_type << "\n";
-    if (config == "bm_cache_ycsb") {
+    if (config == "bm_cache_ycsb" || config == "bm_cache_bistorage_ycsb") {
         std::cout << "  Workload Type: " << workload_type << "\n";
     } else {
         std::cout << "  Operation: " << operation << "\n";
@@ -331,9 +467,48 @@ int main(int argc, char* argv[])
         std::cerr << "Error: bm_cache_ycsb configuration not available in this build" << std::endl;
         return 1;
 #endif
+    } else if (config == "bm_cache_bistorage") {
+#ifdef __TREE_WITH_CACHE__
+        bm_tree_with_cache_bistorage::test_bistorage_with_shell_parameters(
+            cache_type, primary_storage_type, secondary_storage_type,
+            primary_read_cost, primary_write_cost, secondary_read_cost, secondary_write_cost,
+            cache_size, page_size, memory_size,
+            tree_type, operation, degree, records, runs, output_dir, 
+            threads, config_name, cache_size_percentage, cache_page_limit);
+#else
+        std::cerr << "Error: bm_cache_bistorage configuration not available in this build" << std::endl;
+        return 1;
+#endif
+    } else if (config == "bm_cache_bistorage_ycsb") {
+#ifdef __TREE_WITH_CACHE__
+        bm_tree_with_cache_bistorage_ycsb::test_bistorage_ycsb_with_shell_parameters(
+            cache_type, primary_storage_type, secondary_storage_type,
+            primary_read_cost, primary_write_cost, secondary_read_cost, secondary_write_cost,
+            cache_size, page_size, memory_size,
+            tree_type, workload_type, degree, records, runs, output_dir, 
+            threads, config_name, cache_size_percentage, cache_page_limit);
+#else
+        std::cerr << "Error: bm_cache_bistorage_ycsb configuration not available in this build" << std::endl;
+        return 1;
+#endif
+    } else if (config == "bm_cache_ycsb_device_aware") {
+#ifdef __TREE_WITH_CACHE__
+        // Device-aware YCSB configuration
+        std::vector<std::string> workload_types = {workload_type};
+        std::vector<std::string> storage_types = {storage_type};
+        std::vector<size_t> degrees_vec = {static_cast<size_t>(degree)};
+        std::vector<size_t> records_vec = {static_cast<size_t>(records)};
+        
+        bm_tree_with_cache_ycsb_device_aware::test_ycsb_with_device_aware_policy(
+            workload_types, storage_types, degrees_vec, records_vec,
+            runs, output_dir, threads);
+#else
+        std::cerr << "Error: bm_cache_ycsb_device_aware configuration not available in this build" << std::endl;
+        return 1;
+#endif
     } else {
         std::cerr << "Error: Unknown configuration: " << config << std::endl;
-        std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb" << std::endl;
+        std::cerr << "Available configurations: bm_nocache, bm_cache, bm_cache_ycsb, bm_cache_bistorage, bm_cache_bistorage_ycsb, bm_cache_ycsb_device_aware" << std::endl;
         return 1;
     }
     

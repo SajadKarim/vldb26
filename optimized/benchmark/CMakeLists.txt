@@ -38,17 +38,41 @@ add_compile_definitions(__TREE_WITH_CACHE__)
 add_subdirectory(../libcache ${PROJECT_BINARY_DIR}/libcache)
 add_subdirectory(../libbtree ${PROJECT_BINARY_DIR}/libbtree)
 
+#add_subdirectory(../tlx ${CMAKE_BINARY_DIR}/tlx_build)
+#target_link_libraries(benchmark PRIVATE tlx)
+
 
 set(CMAKE_CXX_COMPILER g++-11)
 
 add_executable(benchmark benchmark.cpp)
 
+# Add policy selector CLI utility
+add_executable(policy_selector_cli policy_selector_cli.cpp)
+set_target_properties(policy_selector_cli PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(policy_selector_cli PRIVATE
+    "${PROJECT_SOURCE_DIR}/../libcache"
+)
+
+# Add DeviceAwarePolicy test program
+#add_executable(test_device_aware_policy test_device_aware_policy.cpp)
+#set_target_properties(test_device_aware_policy PROPERTIES
+#    CXX_STANDARD 20
+#    CXX_STANDARD_REQUIRED ON
+#)
+#target_include_directories(test_device_aware_policy PRIVATE
+#    "${PROJECT_SOURCE_DIR}/../libcache"
+#)
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 #find_library(URING_LIB uring REQUIRED)
 pkg_check_modules(LIBPMEM REQUIRED libpmem)
 pkg_check_modules(LIBURING REQUIRED liburing)
+
+#target_link_libraries(benchmark PRIVATE tlx)
 
 target_link_libraries(benchmark PRIVATE Threads::Threads)
 

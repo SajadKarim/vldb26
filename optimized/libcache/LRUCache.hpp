@@ -928,6 +928,20 @@ public:
 
 		ASSERT(ptrObject->m_ptrCoreObject != nullptr && "The requested object does not exist.");
 
+#ifdef __COST_WEIGHTED_EVICTION__
+		// Capture the cost of accessing this object from storage (only for BiStorage)
+		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
+		{
+			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
+			ptrObject->setObjectCost(accessCost);
+		}
+		else
+		{
+			// For non-BiStorage, use default cost of 1
+			ptrObject->setObjectCost(1);
+		}
+#endif
+
 #ifdef __CONCURRENT__
 		m_nUsedCacheCapacity.fetch_add(1, std::memory_order_relaxed);
 #else //__CONCURRENT__
@@ -961,6 +975,20 @@ public:
 		uidObject.createUIDFromVolatilePointer((uint8_t)Type::UID, reinterpret_cast<uintptr_t>(ptrObject));
 
 		ptrObject->m_uid = uidObject;
+
+#ifdef __COST_WEIGHTED_EVICTION__
+		// Set cost for newly created objects (only for BiStorage)
+		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
+		{
+			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
+			ptrObject->setObjectCost(accessCost);
+		}
+		else
+		{
+			// For non-BiStorage, use default cost of 1
+			ptrObject->setObjectCost(1);
+		}
+#endif
 
 #ifdef __CONCURRENT__
 		m_nUsedCacheCapacity.fetch_add(1, std::memory_order_relaxed);
@@ -1138,19 +1166,172 @@ private:
 
 	}
 
+#ifdef __COST_WEIGHTED_EVICTION__
+	/**
+	 * @brief Unlink a node from any position in the doubly-linked list
+	 * 
+	 * This helper handles removing a node from head, middle, or tail positions.
+	 * Does NOT decrement m_nUsedCacheCapacity (caller's responsibility).
+	 * 
+	 * @param ptrNode The node to unlink
+	 */
+	inline void unlinkNode(ObjectTypePtr ptrNode)
+	{
+		if (!ptrNode) return;
+
+		ObjectTypePtr prev = ptrNode->m_ptrPrev;
+		ObjectTypePtr next = ptrNode->m_ptrNext;
+
+		// Case 1: Node is both head and tail (only element)
+		if (ptrNode == m_ptrHead && ptrNode == m_ptrTail)
+		{
+			m_ptrHead = nullptr;
+			m_ptrTail = nullptr;
+		}
+		// Case 2: Node is head
+		else if (ptrNode == m_ptrHead)
+		{
+			m_ptrHead = next;
+			if (next)
+			{
+				next->m_ptrPrev = nullptr;
+			}
+		}
+		// Case 3: Node is tail
+		else if (ptrNode == m_ptrTail)
+		{
+			m_ptrTail = prev;
+			if (prev)
+			{
+				prev->m_ptrNext = nullptr;
+			}
+		}
+		// Case 4: Node is in the middle
+		else
+		{
+			if (prev)
+			{
+				prev->m_ptrNext = next;
+			}
+			if (next)
+			{
+				next->m_ptrPrev = prev;
+			}
+		}
+
+		// Clear the removed node's pointers
+		ptrNode->m_ptrNext = nullptr;
+		ptrNode->m_ptrPrev = nullptr;
+	}
+
+	/**
+	 * @brief Find eviction victim using cost-weighted strategy for BiStorage
+	 * 
+	 * Strategy for BiStorage (two-tier costs):
+	 * - Compare tail with its predecessor
+	 * - Evict whichever has LOWER cost (cheaper to re-fetch)
+	 * - If tail has lower cost → evict tail
+	 * - If predecessor has lower cost → evict predecessor
+	 * - If costs are equal → evict tail (LRU default)
+	 * 
+	 * This prefers evicting cheap objects (IndexNodes) over expensive ones (DataNodes)
+	 * 
+	 * @return Pointer to the victim node, or nullptr if no victim found
+	 */
+	inline ObjectTypePtr findVictimByCostRatio()
+	{
+		if (!m_ptrTail) return nullptr;
+
+		ObjectTypePtr tail = m_ptrTail;
+		ObjectTypePtr predecessor = m_ptrTail->m_ptrPrev;
+
+#ifdef __CONCURRENT__
+		// If tail is in use, can't evict it
+		if (tail->m_nUseCounter.load(std::memory_order_relaxed) > 0)
+		{
+			return nullptr; // Let caller handle this
+		}
+#endif
+
+		// If no predecessor, must evict tail
+		if (!predecessor)
+		{
+			return tail;
+		}
+
+#ifdef __CONCURRENT__
+		// If predecessor is in use, evict tail
+		if (predecessor->m_nUseCounter.load(std::memory_order_relaxed) > 0)
+		{
+			return tail;
+		}
+#endif
+
+		uint64_t tailCost = tail->getObjectCost();
+		uint64_t predCost = predecessor->getObjectCost();
+
+		// Evict whichever has lower cost (cheaper to re-fetch)
+		// If costs are equal, prefer tail (LRU default)
+		if (tailCost <= predCost)
+		{
+			return tail;
+		}
+		else
+		{
+			return predecessor;
+		}
+	}
+#endif // __COST_WEIGHTED_EVICTION__
+
 	inline void flushItemsToStorage()
 	{
 #ifdef __CONCURRENT__
 		std::vector<ObjectTypePtr> vtObjects;
 
 		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
+		
+		auto nUsedCacheCapacity = m_nUsedCacheCapacity.load(std::memory_order_relaxed);
 
-		if (m_nUsedCacheCapacity <= m_nCacheCapacity)
+		if (nUsedCacheCapacity <= m_nCacheCapacity)
 			return;
 
-		int nFlushCount = m_nUsedCacheCapacity - m_nCacheCapacity;
+		int nFlushCount = nUsedCacheCapacity - m_nCacheCapacity;
 		for (; nFlushCount > 0; nFlushCount--)
 		{
+#ifdef __COST_WEIGHTED_EVICTION__
+			// Use cost-weighted victim selection
+			ObjectTypePtr ptrItemToFlush = findVictimByCostRatio();
+			
+			if (!ptrItemToFlush) break;  // No victim found (all in use)
+			
+			if (!ptrItemToFlush->m_mtx.try_lock()) break;
+			
+			if (ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) != 0)
+			{
+				ptrItemToFlush->m_mtx.unlock();
+				break;
+			}
+
+			// Check if this is an IndexNode and has dirty dependents in cache
+			// If it does, we cannot evict it yet (children must be flushed first)
+			if (ptrItemToFlush->_havedependentsincache())
+			{
+				ptrItemToFlush->m_mtx.unlock();
+				break;
+			}
+
+			ASSERT(ptrItemToFlush->m_ptrCoreObject != nullptr);
+
+			vtObjects.push_back(ptrItemToFlush);
+
+			// Unlink the victim from the list (could be tail or predecessor)
+			unlinkNode(ptrItemToFlush);
+
+			m_nUsedCacheCapacity.fetch_sub(1, std::memory_order_relaxed);
+
+			ASSERT(ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) == 0);
+#else
+			// Traditional LRU: always evict tail
 			//auto nUseCounter = m_ptrTail->m_nUseCounter.load(std::memory_order_relaxed);
 			//ASSERT(nUseCounter >= 0);
 
@@ -1196,6 +1377,7 @@ private:
 			m_nUsedCacheCapacity.fetch_sub(1, std::memory_order_relaxed);
 
 			ASSERT(ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) == 0);
+#endif // __COST_WEIGHTED_EVICTION__
 		}
 
 		lock_cache.unlock();
@@ -1238,6 +1420,49 @@ private:
 #else //__CONCURRENT__
 		while (m_nUsedCacheCapacity > m_nCacheCapacity)
 		{
+#ifdef __COST_WEIGHTED_EVICTION__
+			// Use cost-weighted victim selection
+			ObjectTypePtr ptrTemp = findVictimByCostRatio();
+			
+			ASSERT(ptrTemp != nullptr);
+
+			// Check if this is an IndexNode and has dirty dependents in cache
+			// If it does, we cannot evict it yet (children must be flushed first)
+			if (ptrTemp->_havedependentsincache())
+			{
+				break;
+			}
+
+			bool is_dirty = ptrTemp->hasUpdatesToBeFlushed();
+			if (is_dirty) //check for uidupdated and uid in the cache object and reset uidupdated once used!!!
+			{
+				ObjectUIDType uidUpdated;
+				if (m_ptrStorage->addObject(ptrTemp, uidUpdated) != CacheErrorCode::Success)
+				{
+					std::cout << "Critical State: Failed to add object to Storage." << std::endl;
+					throw new std::logic_error(".....");   // TODO: critical log.
+				}
+
+				ptrTemp->m_uidUpdated = uidUpdated;
+			}
+
+#ifdef __CACHE_COUNTERS__
+			// Record eviction with dirty flag
+			this->recordEviction(is_dirty);
+#endif
+
+			// Unlink the victim from the list (could be tail or predecessor)
+			unlinkNode(ptrTemp);
+
+			// Call custom deletion logic and release the pointer
+			ptrTemp->m_bDirty = false;
+			ptrTemp->deleteCoreObject();
+			ptrTemp = nullptr;
+
+			ASSERT(m_nUsedCacheCapacity != 0);
+			m_nUsedCacheCapacity--;
+#else
+			// Traditional LRU: always evict tail
 			ASSERT(m_ptrTail != nullptr);
 
 			bool is_dirty = m_ptrTail->hasUpdatesToBeFlushed();
@@ -1288,6 +1513,7 @@ private:
 
 			ASSERT(m_nUsedCacheCapacity != 0);
 			m_nUsedCacheCapacity--;
+#endif // __COST_WEIGHTED_EVICTION__
 		}
 #endif //__CONCURRENT__
 	}
@@ -1296,11 +1522,13 @@ private:
 	{
 #ifdef __CONCURRENT__
 		std::unique_lock<std::shared_mutex> lock_cache(m_mtxCache);
+		while (m_nUsedCacheCapacity.load(std::memory_order_relaxed) > 0)
+#else //__CONCURRENT__
+	while (m_nUsedCacheCapacity > 0)
 #endif //__CONCURRENT__
 
-		while (m_nUsedCacheCapacity > 0)
 		{
-			ASSERT(m_ptrTail != nullptr);
+			if (m_ptrTail == nullptr) break;
 
 #ifdef __CONCURRENT__
 			if (m_ptrTail->m_nUseCounter.load(std::memory_order_relaxed) != 0) break;

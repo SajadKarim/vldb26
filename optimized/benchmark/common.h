@@ -67,9 +67,18 @@
 #define WAL_FILE_PATH "c:\\wal.bin"
 #define FILE_STORAGE_PATH "c:\\file_storage.bin"
 #define PMEM_STORAGE_PATH "c:\\pmem_storage.bin"
+#define PRIMARY_FILE_STORAGE_PATH "c:\\primary_file_storage.bin"
+#define PRIMARY_PMEM_STORAGE_PATH "c:\\primary_pmem_storage.bin"
 #define __CACHE_SIZE__ 100
 #define __NO_OF_RECORDS__ 500000
 #define __STORAGE_SIZE__ 2ULL * 1024 * 1024 * 1024
+// BiStorage paths and cost parameters
+#define BISTORAGE_PRIMARY_READ_COST 10
+#define BISTORAGE_PRIMARY_WRITE_COST 10
+#define BISTORAGE_SECONDARY_READ_COST_PMEM 300
+#define BISTORAGE_SECONDARY_WRITE_COST_PMEM 300
+#define BISTORAGE_SECONDARY_READ_COST_FILE 5000
+#define BISTORAGE_SECONDARY_WRITE_COST_FILE 5000
 #else //_MSC_VER
 #define WAL_FILE_PATH "/mnt/tmpfs/wal.bin"
 #define FILE_STORAGE_PATH "/home/skarim/file_storage.bin"
@@ -77,6 +86,13 @@
 #define __CACHE_SIZE__ 1000
 #define __NO_OF_RECORDS__ 100000
 #define __STORAGE_SIZE__ 2ULL * 1024 * 1024 * 1024
+// BiStorage paths and cost parameters
+#define BISTORAGE_PRIMARY_READ_COST 10
+#define BISTORAGE_PRIMARY_WRITE_COST 10
+#define BISTORAGE_SECONDARY_READ_COST_PMEM 300
+#define BISTORAGE_SECONDARY_WRITE_COST_PMEM 300
+#define BISTORAGE_SECONDARY_READ_COST_FILE 5000
+#define BISTORAGE_SECONDARY_WRITE_COST_FILE 5000
 #endif //_MSC_VER
 
 struct CHAR16 {

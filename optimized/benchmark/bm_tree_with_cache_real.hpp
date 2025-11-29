@@ -980,7 +980,7 @@ void run_real_cache_benchmark(
                     ptrTree.insert(vtInsertData[i], value);
                 }
             }
-            
+            //ptrTree.flush();
             // Then perform search operations with threading support
             perform_search_operations<StoreType, KeyType, ValueType>(
                 ptrTree, vtNumberData, records, threads, duration,

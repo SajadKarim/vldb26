@@ -594,6 +594,19 @@ public:
 		ptrObject->m_nQueueType = QType::NONE;
 		ptrObject->m_bIsDowgraded = false;
 
+#ifdef __COST_WEIGHTED_EVICTION__
+		// Capture the cost of accessing this object from storage
+		if constexpr (requires { m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType); })
+		{
+			uint64_t accessCost = m_ptrStorage->getAccessCost(ptrObject->m_nCoreObjectType);
+			ptrObject->setObjectCost(accessCost);
+		}
+		else
+		{
+			ptrObject->setObjectCost(1);
+		}
+#endif //__COST_WEIGHTED_EVICTION__
+
 #ifdef __CONCURRENT__
 		m_nUsedCapacityHybridQ.fetch_add(1, std::memory_order_relaxed);
 #else //__CONCURRENT__
@@ -687,6 +700,11 @@ public:
 		uidObject.createUIDFromVolatilePointer((uint8_t)Type::UID, reinterpret_cast<uintptr_t>(ptrObject));
 
 		ptrObject->m_uid = uidObject;
+
+#ifdef __COST_WEIGHTED_EVICTION__
+		// Newly created objects get default cost
+		ptrObject->setObjectCost(1);
+#endif //__COST_WEIGHTED_EVICTION__
 
 #ifdef __CONCURRENT__
 		m_nUsedCapacityHybridQ.fetch_add(1, std::memory_order_relaxed);
@@ -1379,6 +1397,110 @@ private:
 		}
 	}
 
+#ifdef __COST_WEIGHTED_EVICTION__
+	/**
+	 * @brief Unlinks a node from the Hybrid Queue without deleting it
+	 * @param ptrNode The node to unlink
+	 */
+	inline void unlinkNodeFromHybridQ(ObjectTypePtr ptrNode)
+	{
+		if (!ptrNode) return;
+
+		ObjectTypePtr prev = ptrNode->m_ptrPrev;
+		ObjectTypePtr next = ptrNode->m_ptrNext;
+
+		// Case 1: Single node (both head and tail)
+		if (!prev && !next)
+		{
+			m_ptrHeadHybridQ = nullptr;
+			m_ptrTailHybridQ = nullptr;
+		}
+		// Case 2: Node is head
+		else if (ptrNode == m_ptrHeadHybridQ)
+		{
+			m_ptrHeadHybridQ = next;
+			if (next)
+			{
+				next->m_ptrPrev = nullptr;
+			}
+		}
+		// Case 3: Node is tail
+		else if (ptrNode == m_ptrTailHybridQ)
+		{
+			m_ptrTailHybridQ = prev;
+			if (prev)
+			{
+				prev->m_ptrNext = nullptr;
+			}
+		}
+		// Case 4: Node is in the middle
+		else
+		{
+			if (prev)
+			{
+				prev->m_ptrNext = next;
+			}
+			if (next)
+			{
+				next->m_ptrPrev = ptrNode->m_ptrPrev;
+			}
+		}
+
+		// Clear the removed node's pointers
+		ptrNode->m_ptrNext = nullptr;
+		ptrNode->m_ptrPrev = nullptr;
+	}
+
+	/**
+	 * @brief Finds the best victim for eviction from Hybrid Queue based on cost ratio
+	 * Compares the tail (LRU position) with its predecessor and evicts whichever has lower cost
+	 * @return Pointer to the victim node, or nullptr if no victim can be found
+	 */
+	inline ObjectTypePtr findVictimByCostRatioHybridQ()
+	{
+		if (!m_ptrTailHybridQ) return nullptr;
+
+		ObjectTypePtr tail = m_ptrTailHybridQ;
+		ObjectTypePtr predecessor = m_ptrTailHybridQ->m_ptrPrev;
+
+#ifdef __CONCURRENT__
+		// If tail is in use, can't evict it
+		if (tail->m_nUseCounter.load(std::memory_order_relaxed) > 0)
+		{
+			return nullptr;
+		}
+#endif //__CONCURRENT__
+
+		// If no predecessor, must evict tail
+		if (!predecessor)
+		{
+			return tail;
+		}
+
+#ifdef __CONCURRENT__
+		// If predecessor is in use, evict tail
+		if (predecessor->m_nUseCounter.load(std::memory_order_relaxed) > 0)
+		{
+			return tail;
+		}
+#endif //__CONCURRENT__
+
+		uint64_t tailCost = tail->getObjectCost();
+		uint64_t predCost = predecessor->getObjectCost();
+
+		// Evict whichever has lower cost (cheaper to re-fetch)
+		// If costs are equal, prefer tail (LRU default)
+		if (tailCost <= predCost)
+		{
+			return tail;
+		}
+		else
+		{
+			return predecessor;
+		}
+	}
+#endif //__COST_WEIGHTED_EVICTION__
+
 	inline void flushItemsToStorage()
 	{
 #ifdef __CONCURRENT__
@@ -1472,6 +1594,28 @@ private:
 		for (; nFlushCount > 0; nFlushCount--)
 		//while (m_nUsedCapacityHybridQ.load(std::memory_order_relaxed) > getCapacityHybridQ())
 		{
+#ifdef __COST_WEIGHTED_EVICTION__
+			// Use cost-weighted victim selection for Hybrid Queue
+			ObjectTypePtr ptrItemToFlush = findVictimByCostRatioHybridQ();
+
+			if (!ptrItemToFlush) break;  // No victim found
+
+			if (!ptrItemToFlush->m_mtx.try_lock()) break;
+
+			if (ptrItemToFlush->m_nUseCounter.load(std::memory_order_relaxed) != 0)
+			{
+				ptrItemToFlush->m_mtx.unlock();
+				break;
+			}
+
+			vtObjects.push_back(ptrItemToFlush);
+
+			// Unlink the victim (could be tail or predecessor)
+			unlinkNodeFromHybridQ(ptrItemToFlush);
+
+			m_nUsedCapacityHybridQ.fetch_sub(1, std::memory_order_relaxed);
+#else
+			// Traditional LRU: always evict tail
 			if (m_ptrTailHybridQ == nullptr) break;
 
 			if (m_ptrTailHybridQ->m_nUseCounter.load(std::memory_order_relaxed) != 0) break;
@@ -1511,6 +1655,7 @@ private:
 			ptrItemToFlush->m_ptrNext = nullptr;
 
 			m_nUsedCapacityHybridQ.fetch_sub(1, std::memory_order_relaxed);
+#endif //__COST_WEIGHTED_EVICTION__
 		}
 
 		lock_cache.unlock();
@@ -1640,6 +1785,50 @@ private:
 
 		while (m_nUsedCapacityHybridQ > getCapacityHybridQ())
 		{
+#ifdef __COST_WEIGHTED_EVICTION__
+			// Use cost-weighted victim selection for Hybrid Queue
+			ObjectTypePtr ptrTemp = findVictimByCostRatioHybridQ();
+
+			if (!ptrTemp) break;  // No victim found
+
+			bool is_dirty = ptrTemp->hasUpdatesToBeFlushed();
+			if (is_dirty) //check for uidupdated and uid in the cache object and reset uidupdated once used!!!
+			{
+				ObjectUIDType uidUpdated;
+				if (m_ptrStorage->addObject(ptrTemp, uidUpdated) != CacheErrorCode::Success)
+				{
+					std::cout << "Critical State: Failed to add object to Storage." << std::endl;
+					throw new std::logic_error(".....");   // TODO: critical log.
+				}
+
+				ptrTemp->m_uidUpdated = uidUpdated;
+			}
+
+#ifdef __CACHE_COUNTERS__
+			// Record eviction with dirty flag
+			this->recordEviction(is_dirty);
+#endif
+
+			ptrTemp->m_bDirty = false;
+
+			// Unlink the victim (could be tail or predecessor)
+			unlinkNodeFromHybridQ(ptrTemp);
+
+#ifdef __MANAGE_GHOST_Q__
+			if (ptrTemp->m_uidUpdated != std::nullopt) addItemToGhostQ(*ptrTemp->m_uidUpdated);
+			else addItemToGhostQ(ptrTemp->m_uid);
+#endif //__MANAGE_GHOST_Q__
+
+			// Call custom deletion logic and release the pointer
+			ptrTemp->m_bDirty = false;
+			ptrTemp->deleteCoreObject();
+			ptrTemp->m_nQueueType = QType::NONE;
+			ptrTemp = nullptr;
+
+			ASSERT(m_nUsedCapacityHybridQ != 0);
+			m_nUsedCapacityHybridQ--;
+#else
+			// Traditional LRU: always evict tail
 			ASSERT(m_ptrTailHybridQ != nullptr);
 
 			bool is_dirty = m_ptrTailHybridQ->hasUpdatesToBeFlushed();
@@ -1696,6 +1885,7 @@ private:
 
 			ASSERT(m_nUsedCapacityHybridQ != 0);
 			m_nUsedCapacityHybridQ--;
+#endif //__COST_WEIGHTED_EVICTION__
 		}
 #endif //__CONCURRENT__
 	}
